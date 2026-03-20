@@ -17,6 +17,8 @@ Custom Home Assistant integration for controlling and monitoring **iRobot Roomba
 
 ## 📦 Installation
 
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?repository=https://github.com/a-mavrides/roomba_v4&category=integration)
+
 ### Option 1: HACS (Recommended)
 
 1. Open **HACS**
