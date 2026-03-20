@@ -1,7 +1,7 @@
 {
   "domain": "roomba_v4",
   "name": "Roomba v4 Cloud",
-  "codeowners": ["@a-mavrides"]
+  "codeowners": ["@a-mavrides"],
   "config_flow": true,
   "documentation": "https://github.com/a-mavrides/roomba_v4",
   "integration_type": "device",
