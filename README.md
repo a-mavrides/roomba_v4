@@ -13,6 +13,7 @@ Custom Home Assistant integration for controlling and monitoring **iRobot Roomba
 * Room / mission support *(if supported by your model)*
 * Cloud-based communication (no local setup required)
 
+
 ---
 
 ## 📦 Installation
