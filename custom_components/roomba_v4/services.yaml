@@ -1,0 +1,45 @@
+
+refresh_map_from_archive:
+  name: Refresh map from archive
+  fields:
+    archive_path:
+      required: true
+      selector:
+        text:
+    show_labels:
+      required: false
+      default: true
+      selector:
+        boolean:
+    show_coverage:
+      required: false
+      default: true
+      selector:
+        boolean:
+
+refresh_map_from_url:
+  name: Refresh map from URL
+  fields:
+    url:
+      required: true
+      selector:
+        text:
+
+clear_path_history:
+  name: Clear path history
+  description: Clear the locally stored robot trail shown on the map.
+
+
+
+clean_room:
+  name: Clean room
+  description: Start cleaning a specific mapped room by its room name.
+  fields:
+    room_name:
+      required: true
+      selector:
+        text:
+    entry_id:
+      required: false
+      selector:
+        text:
