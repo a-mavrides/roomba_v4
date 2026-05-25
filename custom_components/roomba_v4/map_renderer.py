@@ -9,9 +9,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+from PIL import Image, ImageDraw
 
 
 def extract_room_info_from_archive(archive_path: str | Path) -> list[dict[str, Any]]:
@@ -27,14 +25,28 @@ def extract_room_info_from_archive(archive_path: str | Path) -> list[dict[str, A
         out: list[dict[str, Any]] = []
         for idx, feat in enumerate(rooms.get("features", []), start=1):
             props = feat.get("properties", {}) or {}
-            label = props.get("name") or props.get("title") or props.get("label") or props.get("id") or f"Room {idx}"
-            room_id = props.get("id") or props.get("room_id") or props.get("region_id") or props.get("segment_id") or str(idx)
-            out.append({
-                "name": str(label),
-                "id": str(room_id),
-                "properties": props,
-                "geometry_type": (feat.get("geometry") or {}).get("type"),
-            })
+            label = (
+                props.get("name")
+                or props.get("title")
+                or props.get("label")
+                or props.get("id")
+                or f"Room {idx}"
+            )
+            room_id = (
+                props.get("id")
+                or props.get("room_id")
+                or props.get("region_id")
+                or props.get("segment_id")
+                or str(idx)
+            )
+            out.append(
+                {
+                    "name": str(label),
+                    "id": str(room_id),
+                    "properties": props,
+                    "geometry_type": (feat.get("geometry") or {}).get("type"),
+                }
+            )
         return out
 
 
@@ -49,6 +61,7 @@ def extract_rooms_from_archive(archive_path: str | Path) -> list[str]:
 def _load_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
+
 def _features(obj: dict[str, Any] | None) -> list[dict[str, Any]]:
     if not obj:
         return []
@@ -58,22 +71,31 @@ def _features(obj: dict[str, Any] | None) -> list[dict[str, Any]]:
         return [obj]
     return []
 
+
 def _coords(geom: dict[str, Any] | None) -> list[tuple[float, float]]:
     out = []
     if not geom:
         return out
+
     def walk(v: Any):
         if isinstance(v, (list, tuple)):
-            if len(v) >= 2 and isinstance(v[0], (int, float)) and isinstance(v[1], (int, float)):
+            if (
+                len(v) >= 2
+                and isinstance(v[0], (int, float))
+                and isinstance(v[1], (int, float))
+            ):
                 out.append((float(v[0]), float(v[1])))
             else:
                 for item in v:
                     walk(item)
+
     walk(geom.get("coordinates", []))
     return out
 
 
-def _effective_geometry(feat: dict[str, Any] | None, *, prefer_simplified: bool = True) -> dict[str, Any] | None:
+def _effective_geometry(
+    feat: dict[str, Any] | None, *, prefer_simplified: bool = True
+) -> dict[str, Any] | None:
     if not feat:
         return None
     props = feat.get("properties", {}) or {}
@@ -83,6 +105,7 @@ def _effective_geometry(feat: dict[str, Any] | None, *, prefer_simplified: bool 
             return simp
     geom = feat.get("geometry")
     return geom if isinstance(geom, dict) else None
+
 
 def _bounds(*objs):
     pts = []
@@ -95,27 +118,10 @@ def _bounds(*objs):
     ys = [p[1] for p in pts]
     return min(xs), max(xs), min(ys), max(ys)
 
-def _plot_polygon(ax, rings, facecolor, edgecolor, alpha=1.0, linewidth=1.0):
-    if not rings:
-        return
-    outer = rings[0]
-    if outer:
-        xs = [p[0] for p in outer]
-        ys = [p[1] for p in outer]
-        ax.fill(
-            xs,
-            ys,
-            facecolor=facecolor,
-            edgecolor=edgecolor,
-            alpha=alpha,
-            linewidth=linewidth,
-            joinstyle="miter",
-            antialiased=False,
-        )
 
-
-
-def _cluster_axis_values(values, tolerance: float = 0.30, snap_step: float = 0.1) -> list[float]:
+def _cluster_axis_values(
+    values, tolerance: float = 0.30, snap_step: float = 0.1
+) -> list[float]:
     vals = sorted(float(v) for v in values)
     if not vals:
         return []
@@ -134,19 +140,26 @@ def _cluster_axis_values(values, tolerance: float = 0.30, snap_step: float = 0.1
         counts: dict[float, int] = {}
         for sv in snapped:
             counts[sv] = counts.get(sv, 0) + 1
-        best = max(counts.items(), key=lambda item: (item[1], -abs(item[0] - (sum(cluster) / len(cluster)))))[0]
+        best = max(
+            counts.items(),
+            key=lambda item: (item[1], -abs(item[0] - (sum(cluster) / len(cluster)))),
+        )[0]
         representatives.append(round(float(best), 3))
     return representatives
 
 
-def _nearest_cluster(value: float, clusters: list[float], max_distance: float = 0.30) -> float:
+def _nearest_cluster(
+    value: float, clusters: list[float], max_distance: float = 0.30
+) -> float:
     if not clusters:
         return value
     best = min(clusters, key=lambda c: abs(c - value))
     return best if abs(best - value) <= max_distance else value
 
 
-def _collect_room_axis_clusters(rooms: dict[str, Any] | None, tolerance: float = 0.30) -> tuple[list[float], list[float]]:
+def _collect_room_axis_clusters(
+    rooms: dict[str, Any] | None, tolerance: float = 0.30
+) -> tuple[list[float], list[float]]:
     xs: list[float] = []
     ys: list[float] = []
     if not rooms:
@@ -164,7 +177,11 @@ def _collect_room_axis_clusters(rooms: dict[str, Any] | None, tolerance: float =
 
 
 def _snap_value(value: float, step: float = 0.1) -> float:
-    return math.floor((value / step) + 0.5) * step if value >= 0 else math.ceil((value / step) - 0.5) * step
+    return (
+        math.floor((value / step) + 0.5) * step
+        if value >= 0
+        else math.ceil((value / step) - 0.5) * step
+    )
 
 
 def _is_axis_aligned(a, b, tol: float = 1e-9) -> bool:
@@ -229,10 +246,16 @@ def _prune_short_axis_segments(points, min_len: float = 0.2, tol: float = 1e-9):
             keep = None
             if _is_axis_aligned(prev, cand1, tol) and _is_axis_aligned(cand1, nxt, tol):
                 keep = cand1
-            elif _is_axis_aligned(prev, cand2, tol) and _is_axis_aligned(cand2, nxt, tol):
+            elif _is_axis_aligned(prev, cand2, tol) and _is_axis_aligned(
+                cand2, nxt, tol
+            ):
                 keep = cand2
             if keep is not None:
-                if new and abs(new[-1][0] - keep[0]) <= tol and abs(new[-1][1] - keep[1]) <= tol:
+                if (
+                    new
+                    and abs(new[-1][0] - keep[0]) <= tol
+                    and abs(new[-1][1] - keep[1]) <= tol
+                ):
                     pass
                 else:
                     new.append(keep)
@@ -244,7 +267,6 @@ def _prune_short_axis_segments(points, min_len: float = 0.2, tol: float = 1e-9):
         out = _remove_consecutive_duplicates(new, tol)
         out = _remove_collinear_axis_points(out, tol)
     return out
-
 
 
 def _segment_axis(a, b, tol: float = 1e-9):
@@ -285,7 +307,12 @@ def _collapse_alternating_stair_runs(points, snap_step: float = 0.1, tol: float 
 
             xs = [out[start][0], out[j % n][0]]
             ys = [out[start][1], out[j % n][1]]
-            seg_lens = [max(abs(out[j % n][0]-out[start][0]), abs(out[j % n][1]-out[start][1]))]
+            seg_lens = [
+                max(
+                    abs(out[j % n][0] - out[start][0]),
+                    abs(out[j % n][1] - out[start][1]),
+                )
+            ]
             x_signs = []
             y_signs = []
             k = j
@@ -295,7 +322,7 @@ def _collapse_alternating_stair_runs(points, snap_step: float = 0.1, tol: float 
                 axis = _segment_axis(a, b, tol)
                 if axis is None or axis == prev_axis:
                     break
-                seg_len = max(abs(b[0]-a[0]), abs(b[1]-a[1]))
+                seg_len = max(abs(b[0] - a[0]), abs(b[1] - a[1]))
                 if seg_len > max_seg:
                     break
                 dx = b[0] - a[0]
@@ -304,31 +331,43 @@ def _collapse_alternating_stair_runs(points, snap_step: float = 0.1, tol: float 
                     x_signs.append(1 if dx > 0 else -1)
                 if abs(dy) > tol:
                     y_signs.append(1 if dy > 0 else -1)
-                xs.append(b[0]); ys.append(b[1]); seg_lens.append(seg_len)
+                xs.append(b[0])
+                ys.append(b[1])
+                seg_lens.append(seg_len)
                 prev_axis = axis
                 k += 1
 
             run_pts = [out[idx % n] for idx in range(start, k + 1)]
             if len(run_pts) >= 5:
-                minx,maxx=min(xs),max(xs)
-                miny,maxy=min(ys),max(ys)
+                minx, maxx = min(xs), max(xs)
+                miny, maxy = min(ys), max(ys)
                 mono_x = len(set(x_signs)) <= 1
                 mono_y = len(set(y_signs)) <= 1
-                if mono_x and mono_y and (maxx-minx) <= max_box and (maxy-miny) <= max_box:
+                if (
+                    mono_x
+                    and mono_y
+                    and (maxx - minx) <= max_box
+                    and (maxy - miny) <= max_box
+                ):
                     first = run_pts[0]
                     last = run_pts[-1]
                     cands = []
-                    cand1=(first[0], last[1])
-                    cand2=(last[0], first[1])
-                    for cand in (cand1,cand2):
-                        if _is_axis_aligned(first,cand,tol) and _is_axis_aligned(cand,last,tol):
+                    cand1 = (first[0], last[1])
+                    cand2 = (last[0], first[1])
+                    for cand in (cand1, cand2):
+                        if _is_axis_aligned(first, cand, tol) and _is_axis_aligned(
+                            cand, last, tol
+                        ):
                             # choose candidate closest to staircase centroid so the shape shift is smaller
-                            cx = sum(x for x,_ in run_pts) / len(run_pts)
-                            cy = sum(y for _,y in run_pts) / len(run_pts)
-                            score = abs(cand[0]-cx) + abs(cand[1]-cy)
-                            cands.append((score,cand))
+                            cx = sum(x for x, _ in run_pts) / len(run_pts)
+                            cy = sum(y for _, y in run_pts) / len(run_pts)
+                            score = abs(cand[0] - cx) + abs(cand[1] - cy)
+                            cands.append((score, cand))
                     if cands:
-                        if not rebuilt or (abs(rebuilt[-1][0]-first[0]) > tol or abs(rebuilt[-1][1]-first[1]) > tol):
+                        if not rebuilt or (
+                            abs(rebuilt[-1][0] - first[0]) > tol
+                            or abs(rebuilt[-1][1] - first[1]) > tol
+                        ):
                             rebuilt.append(first)
                         rebuilt.append(sorted(cands, key=lambda t: t[0])[0][1])
                         i = k
@@ -343,7 +382,6 @@ def _collapse_alternating_stair_runs(points, snap_step: float = 0.1, tol: float 
     return out
 
 
-
 def _axis_dir(a, b, tol: float = 1e-9):
     dx = b[0] - a[0]
     dy = b[1] - a[1]
@@ -354,7 +392,9 @@ def _axis_dir(a, b, tol: float = 1e-9):
     return "v", (1 if dy > 0 else -1)
 
 
-def _remove_small_rectilinear_features(points, snap_step: float = 0.1, tol: float = 1e-9):
+def _remove_small_rectilinear_features(
+    points, snap_step: float = 0.1, tol: float = 1e-9
+):
     """Remove narrow orthogonal notches/extrusions while preserving main walls.
 
     Targets 5-segment runs A-B-A-B-A where the first/third/fifth segments keep
@@ -364,8 +404,8 @@ def _remove_small_rectilinear_features(points, snap_step: float = 0.1, tol: floa
     if len(points) < 6:
         return points
 
-    depth_limit = snap_step * 4.5   # ~0.45 m at 0.1 grid
-    span_limit = snap_step * 12.0   # keep local only
+    depth_limit = snap_step * 4.5  # ~0.45 m at 0.1 grid
+    span_limit = snap_step * 12.0  # keep local only
 
     out = points[:]
     changed = True
@@ -376,25 +416,45 @@ def _remove_small_rectilinear_features(points, snap_step: float = 0.1, tol: floa
         i = 0
         while i < n:
             if i + 5 < n:
-                p0, p1, p2, p3, p4, p5 = out[i:i+6]
+                p0, p1, p2, p3, p4, p5 = out[i : i + 6]
                 a1, d1 = _axis_dir(p0, p1, tol)
                 a2, d2 = _axis_dir(p1, p2, tol)
                 a3, d3 = _axis_dir(p2, p3, tol)
                 a4, d4 = _axis_dir(p3, p4, tol)
                 a5, d5 = _axis_dir(p4, p5, tol)
-                axes_ok = a1 and a2 and a3 and a4 and a5 and a1 == a3 == a5 and a2 == a4 and a1 != a2
+                axes_ok = (
+                    a1
+                    and a2
+                    and a3
+                    and a4
+                    and a5
+                    and a1 == a3 == a5
+                    and a2 == a4
+                    and a1 != a2
+                )
                 if axes_ok:
                     same_main_dir = d1 == d3 == d5
                     opposite_cross = d2 == -d4
-                    p0_p5_aligned = (a1 == 'h' and abs(p0[1] - p5[1]) <= tol) or (a1 == 'v' and abs(p0[0] - p5[0]) <= tol)
-                    xs = [p[0] for p in (p0,p1,p2,p3,p4,p5)]
-                    ys = [p[1] for p in (p0,p1,p2,p3,p4,p5)]
+                    p0_p5_aligned = (a1 == "h" and abs(p0[1] - p5[1]) <= tol) or (
+                        a1 == "v" and abs(p0[0] - p5[0]) <= tol
+                    )
+                    xs = [p[0] for p in (p0, p1, p2, p3, p4, p5)]
+                    ys = [p[1] for p in (p0, p1, p2, p3, p4, p5)]
                     width = max(xs) - min(xs)
                     height = max(ys) - min(ys)
                     depth = min(width, height)
                     span = max(width, height)
-                    if same_main_dir and opposite_cross and p0_p5_aligned and depth <= depth_limit and span <= span_limit:
-                        if not rebuilt or (abs(rebuilt[-1][0]-p0[0]) > tol or abs(rebuilt[-1][1]-p0[1]) > tol):
+                    if (
+                        same_main_dir
+                        and opposite_cross
+                        and p0_p5_aligned
+                        and depth <= depth_limit
+                        and span <= span_limit
+                    ):
+                        if not rebuilt or (
+                            abs(rebuilt[-1][0] - p0[0]) > tol
+                            or abs(rebuilt[-1][1] - p0[1]) > tol
+                        ):
                             rebuilt.append(p0)
                         rebuilt.append(p5)
                         i += 5
@@ -406,6 +466,7 @@ def _remove_small_rectilinear_features(points, snap_step: float = 0.1, tol: floa
         out = _remove_consecutive_duplicates(rebuilt, tol)
         out = _remove_collinear_axis_points(out, tol)
     return out
+
 
 def _normalize_axis_chain(points, tol: float = 1e-9):
     if len(points) < 2:
@@ -424,9 +485,12 @@ def _normalize_axis_chain(points, tol: float = 1e-9):
     return out
 
 
-
-
-def _straighten_segment_runs(points, x_clusters: list[float] | None = None, y_clusters: list[float] | None = None, tol: float = 1e-9):
+def _straighten_segment_runs(
+    points,
+    x_clusters: list[float] | None = None,
+    y_clusters: list[float] | None = None,
+    tol: float = 1e-9,
+):
     if len(points) < 3:
         return points[:]
     out = points[:]
@@ -455,8 +519,16 @@ def _straighten_segment_runs(points, x_clusters: list[float] | None = None, y_cl
             # vertical-ish wall around curr
             if abs(prev[0] - curr[0]) <= 0.35 and abs(curr[0] - nxt[0]) <= 0.35:
                 target_x = choose_value([prev[0], curr[0], nxt[0]], x_clusters)
-                if target_x is not None and (abs(prev[0] - target_x) <= 0.35 and abs(curr[0] - target_x) <= 0.35 and abs(nxt[0] - target_x) <= 0.35):
-                    if new[i - 1][0] != target_x or new[i][0] != target_x or new[(i + 1) % n][0] != target_x:
+                if target_x is not None and (
+                    abs(prev[0] - target_x) <= 0.35
+                    and abs(curr[0] - target_x) <= 0.35
+                    and abs(nxt[0] - target_x) <= 0.35
+                ):
+                    if (
+                        new[i - 1][0] != target_x
+                        or new[i][0] != target_x
+                        or new[(i + 1) % n][0] != target_x
+                    ):
                         new[i - 1] = (target_x, new[i - 1][1])
                         new[i] = (target_x, new[i][1])
                         new[(i + 1) % n] = (target_x, new[(i + 1) % n][1])
@@ -464,8 +536,16 @@ def _straighten_segment_runs(points, x_clusters: list[float] | None = None, y_cl
             # horizontal-ish wall around curr
             if abs(prev[1] - curr[1]) <= 0.35 and abs(curr[1] - nxt[1]) <= 0.35:
                 target_y = choose_value([prev[1], curr[1], nxt[1]], y_clusters)
-                if target_y is not None and (abs(prev[1] - target_y) <= 0.35 and abs(curr[1] - target_y) <= 0.35 and abs(nxt[1] - target_y) <= 0.35):
-                    if new[i - 1][1] != target_y or new[i][1] != target_y or new[(i + 1) % n][1] != target_y:
+                if target_y is not None and (
+                    abs(prev[1] - target_y) <= 0.35
+                    and abs(curr[1] - target_y) <= 0.35
+                    and abs(nxt[1] - target_y) <= 0.35
+                ):
+                    if (
+                        new[i - 1][1] != target_y
+                        or new[i][1] != target_y
+                        or new[(i + 1) % n][1] != target_y
+                    ):
                         new[i - 1] = (new[i - 1][0], target_y)
                         new[i] = (new[i][0], target_y)
                         new[(i + 1) % n] = (new[(i + 1) % n][0], target_y)
@@ -474,10 +554,14 @@ def _straighten_segment_runs(points, x_clusters: list[float] | None = None, y_cl
         out = _remove_collinear_axis_points(out, tol)
     return out
 
+
 def _ring_is_safe(points, tol: float = 1e-9):
     if len(points) < 4:
         return False
-    if abs(points[0][0] - points[-1][0]) > tol or abs(points[0][1] - points[-1][1]) > tol:
+    if (
+        abs(points[0][0] - points[-1][0]) > tol
+        or abs(points[0][1] - points[-1][1]) > tol
+    ):
         return False
     unique = {(round(x, 6), round(y, 6)) for x, y in points[:-1]}
     if len(unique) < 3:
@@ -490,7 +574,12 @@ def _ring_is_safe(points, tol: float = 1e-9):
     return True
 
 
-def _clean_room_ring(ring, snap_step: float = 0.1, x_clusters: list[float] | None = None, y_clusters: list[float] | None = None):
+def _clean_room_ring(
+    ring,
+    snap_step: float = 0.1,
+    x_clusters: list[float] | None = None,
+    y_clusters: list[float] | None = None,
+):
     if not ring:
         return ring
     closed = len(ring) > 1 and ring[0] == ring[-1]
@@ -511,7 +600,11 @@ def _clean_room_ring(ring, snap_step: float = 0.1, x_clusters: list[float] | Non
     if closed and fallback and fallback[0] != fallback[-1]:
         fallback.append(fallback[0])
 
-    snapped = fallback[:-1] if closed and fallback and fallback[0] == fallback[-1] else fallback[:]
+    snapped = (
+        fallback[:-1]
+        if closed and fallback and fallback[0] == fallback[-1]
+        else fallback[:]
+    )
     if len(snapped) >= 3:
         repaired = []
         n = len(snapped)
@@ -527,7 +620,12 @@ def _clean_room_ring(ring, snap_step: float = 0.1, x_clusters: list[float] | Non
             if d1 <= (snap_step * 1.5) and d2 <= (snap_step * 1.5):
                 corner1 = (prev[0], nxt[1])
                 corner2 = (nxt[0], prev[1])
-                cand = corner1 if _is_axis_aligned(prev, corner1) and _is_axis_aligned(corner1, nxt) else corner2
+                cand = (
+                    corner1
+                    if _is_axis_aligned(prev, corner1)
+                    and _is_axis_aligned(corner1, nxt)
+                    else corner2
+                )
                 if _is_axis_aligned(prev, cand) and _is_axis_aligned(cand, nxt):
                     if not repaired or repaired[-1] != cand:
                         repaired.append(cand)
@@ -538,9 +636,13 @@ def _clean_room_ring(ring, snap_step: float = 0.1, x_clusters: list[float] | Non
         snapped = _collapse_alternating_stair_runs(snapped, snap_step)
         snapped = _remove_small_rectilinear_features(snapped, snap_step)
         snapped = _normalize_axis_chain(snapped)
-        snapped = _straighten_segment_runs(snapped, x_clusters=x_clusters, y_clusters=y_clusters)
+        snapped = _straighten_segment_runs(
+            snapped, x_clusters=x_clusters, y_clusters=y_clusters
+        )
         snapped = _prune_short_axis_segments(snapped, min_len=snap_step * 2.0)
-        snapped = _straighten_segment_runs(snapped, x_clusters=x_clusters, y_clusters=y_clusters)
+        snapped = _straighten_segment_runs(
+            snapped, x_clusters=x_clusters, y_clusters=y_clusters
+        )
         snapped = _remove_consecutive_duplicates(snapped)
         snapped = _remove_collinear_axis_points(snapped)
 
@@ -553,19 +655,23 @@ def _clean_room_ring(ring, snap_step: float = 0.1, x_clusters: list[float] | Non
     return fallback if _ring_is_safe(fallback) else ring
 
 
-def _clean_room_rings(rings, x_clusters: list[float] | None = None, y_clusters: list[float] | None = None):
+def _clean_room_rings(
+    rings, x_clusters: list[float] | None = None, y_clusters: list[float] | None = None
+):
     if not rings:
         return rings
     cleaned = []
     for ring in rings:
-        cleaned.append(_clean_room_ring(ring, x_clusters=x_clusters, y_clusters=y_clusters))
+        cleaned.append(
+            _clean_room_ring(ring, x_clusters=x_clusters, y_clusters=y_clusters)
+        )
     return cleaned
+
 
 def _ring_center(ring):
     xs = [p[0] for p in ring]
     ys = [p[1] for p in ring]
-    return sum(xs)/len(xs), sum(ys)/len(ys)
-
+    return sum(xs) / len(xs), sum(ys) / len(ys)
 
 
 def _png_size(png_bytes: bytes) -> tuple[int, int] | None:
@@ -575,21 +681,49 @@ def _png_size(png_bytes: bytes) -> tuple[int, int] | None:
     return int(width), int(height)
 
 
-def extract_map_render_metadata(archive_path: str | Path, png_bytes: bytes | None = None) -> dict[str, Any]:
+def extract_map_render_metadata(
+    archive_path: str | Path, png_bytes: bytes | None = None
+) -> dict[str, Any]:
     archive = Path(archive_path)
     with tempfile.TemporaryDirectory(prefix="roomba_v4_meta_") as tmp:
         tmpdir = Path(tmp)
         with tarfile.open(archive, "r:gz") as tf:
             tf.extractall(tmpdir)
 
-        rooms = _load_json(tmpdir / "rooms.geojson") if (tmpdir / "rooms.geojson").exists() else None
-        borders = _load_json(tmpdir / "borders.geojson") if (tmpdir / "borders.geojson").exists() else None
-        policy = _load_json(tmpdir / "policyZones.geojson") if (tmpdir / "policyZones.geojson").exists() else None
-        trajectories = _load_json(tmpdir / "trajectories.geojson") if (tmpdir / "trajectories.geojson").exists() else None
-        coverage = _load_json(tmpdir / "coverage.geojson") if (tmpdir / "coverage.geojson").exists() else None
-        dock = _load_json(tmpdir / "dockPose.geojson") if (tmpdir / "dockPose.geojson").exists() else None
+        rooms = (
+            _load_json(tmpdir / "rooms.geojson")
+            if (tmpdir / "rooms.geojson").exists()
+            else None
+        )
+        borders = (
+            _load_json(tmpdir / "borders.geojson")
+            if (tmpdir / "borders.geojson").exists()
+            else None
+        )
+        policy = (
+            _load_json(tmpdir / "policyZones.geojson")
+            if (tmpdir / "policyZones.geojson").exists()
+            else None
+        )
+        trajectories = (
+            _load_json(tmpdir / "trajectories.geojson")
+            if (tmpdir / "trajectories.geojson").exists()
+            else None
+        )
+        coverage = (
+            _load_json(tmpdir / "coverage.geojson")
+            if (tmpdir / "coverage.geojson").exists()
+            else None
+        )
+        dock = (
+            _load_json(tmpdir / "dockPose.geojson")
+            if (tmpdir / "dockPose.geojson").exists()
+            else None
+        )
 
-        minx, maxx, miny, maxy = _bounds(rooms, borders, policy, trajectories, coverage, dock)
+        minx, maxx, miny, maxy = _bounds(
+            rooms, borders, policy, trajectories, coverage, dock
+        )
         dx = max(maxx - minx, 1)
         dy = max(maxy - miny, 1)
         padx = dx * 0.05
@@ -600,7 +734,12 @@ def extract_map_render_metadata(archive_path: str | Path, png_bytes: bytes | Non
         render_maxy = maxy + pady
         out: dict[str, Any] = {
             "bounds": {"min_x": minx, "max_x": maxx, "min_y": miny, "max_y": maxy},
-            "render_bounds": {"min_x": render_minx, "max_x": render_maxx, "min_y": render_miny, "max_y": render_maxy},
+            "render_bounds": {
+                "min_x": render_minx,
+                "max_x": render_maxx,
+                "min_y": render_miny,
+                "max_y": render_maxy,
+            },
             "padding": {"x": padx, "y": pady},
         }
 
@@ -609,9 +748,18 @@ def extract_map_render_metadata(archive_path: str | Path, png_bytes: bytes | Non
             width, height = size
             out["image"] = {"width": width, "height": height}
             out["calibration_points"] = [
-                {"map": {"x": 0, "y": height}, "vacuum": {"x": render_minx, "y": render_miny}},
-                {"map": {"x": width, "y": height}, "vacuum": {"x": render_maxx, "y": render_miny}},
-                {"map": {"x": 0, "y": 0}, "vacuum": {"x": render_minx, "y": render_maxy}},
+                {
+                    "map": {"x": 0, "y": height},
+                    "vacuum": {"x": render_minx, "y": render_miny},
+                },
+                {
+                    "map": {"x": width, "y": height},
+                    "vacuum": {"x": render_maxx, "y": render_miny},
+                },
+                {
+                    "map": {"x": 0, "y": 0},
+                    "vacuum": {"x": render_minx, "y": render_maxy},
+                },
             ]
 
         dock_features = _features(dock)
@@ -629,99 +777,212 @@ def extract_map_render_metadata(archive_path: str | Path, png_bytes: bytes | Non
 
         return out
 
-def render_archive_to_png_bytes(archive_path: str | Path, show_labels: bool = True, show_coverage: bool = True) -> bytes:
+
+def render_archive_to_png_bytes(
+    archive_path: str | Path,
+    show_labels: bool = True,
+    show_coverage: bool = True,
+) -> bytes:
     archive = Path(archive_path)
+
     with tempfile.TemporaryDirectory(prefix="roomba_v4_map_") as tmp:
         tmpdir = Path(tmp)
+
         with tarfile.open(archive, "r:gz") as tf:
             tf.extractall(tmpdir)
 
-        rooms = _load_json(tmpdir / "rooms.geojson") if (tmpdir / "rooms.geojson").exists() else None
-        borders = _load_json(tmpdir / "borders.geojson") if (tmpdir / "borders.geojson").exists() else None
-        policy = _load_json(tmpdir / "policyZones.geojson") if (tmpdir / "policyZones.geojson").exists() else None
-        trajectories = _load_json(tmpdir / "trajectories.geojson") if (tmpdir / "trajectories.geojson").exists() else None
-        coverage = _load_json(tmpdir / "coverage.geojson") if (tmpdir / "coverage.geojson").exists() else None
-        dock = _load_json(tmpdir / "dockPose.geojson") if (tmpdir / "dockPose.geojson").exists() else None
+        rooms = (
+            _load_json(tmpdir / "rooms.geojson")
+            if (tmpdir / "rooms.geojson").exists()
+            else None
+        )
+        borders = (
+            _load_json(tmpdir / "borders.geojson")
+            if (tmpdir / "borders.geojson").exists()
+            else None
+        )
+        policy = (
+            _load_json(tmpdir / "policyZones.geojson")
+            if (tmpdir / "policyZones.geojson").exists()
+            else None
+        )
+        trajectories = (
+            _load_json(tmpdir / "trajectories.geojson")
+            if (tmpdir / "trajectories.geojson").exists()
+            else None
+        )
+        coverage = (
+            _load_json(tmpdir / "coverage.geojson")
+            if (tmpdir / "coverage.geojson").exists()
+            else None
+        )
+        dock = (
+            _load_json(tmpdir / "dockPose.geojson")
+            if (tmpdir / "dockPose.geojson").exists()
+            else None
+        )
 
-        minx, maxx, miny, maxy = _bounds(rooms, borders, policy, trajectories, coverage, dock)
+        minx, maxx, miny, maxy = _bounds(
+            rooms,
+            borders,
+            policy,
+            trajectories,
+            coverage,
+            dock,
+        )
+
         dx = max(maxx - minx, 1)
         dy = max(maxy - miny, 1)
+
         padx = dx * 0.05
         pady = dy * 0.05
 
-        fig, ax = plt.subplots(figsize=(10, max(6, 10 * (dy / dx) if dx else 6)), dpi=150)
-        ax.set_facecolor("#f8fafc")
+        render_minx = minx - padx
+        render_maxx = maxx + padx
+        render_miny = miny - pady
+        render_maxy = maxy + pady
+
+        target_width = 1500
+        target_height = max(900, int(target_width * (dy / dx))) if dx else 900
+
+        scale_x = target_width / max(render_maxx - render_minx, 1)
+        scale_y = target_height / max(render_maxy - render_miny, 1)
+        scale = min(scale_x, scale_y)
+
+        width = max(1, int((render_maxx - render_minx) * scale))
+        height = max(1, int((render_maxy - render_miny) * scale))
+
+        image = Image.new("RGBA", (width, height), "#f8fafcff")
+        draw = ImageDraw.Draw(image, "RGBA")
+
+        def to_pixel(point):
+            x, y = point
+            return (
+                int((float(x) - render_minx) * scale),
+                int((render_maxy - float(y)) * scale),
+            )
+
+        def draw_polygon(rings, fill, outline, line_width=1):
+            if not rings:
+                return
+
+            outer = rings[0]
+            if not outer:
+                return
+
+            points = [to_pixel(point) for point in outer]
+
+            if len(points) >= 3:
+                draw.polygon(points, fill=fill)
+                draw.line(
+                    points + [points[0]],
+                    fill=outline,
+                    width=line_width,
+                    joint="curve",
+                )
 
         if show_coverage and coverage:
             for feat in _features(coverage):
-                geom = feat.get("geometry", {})
+                geom = feat.get("geometry", {}) or {}
                 if geom.get("type") == "Polygon":
-                    _plot_polygon(ax, geom.get("coordinates", []), "#dbeafe", "#bfdbfe", alpha=0.5, linewidth=0.5)
+                    draw_polygon(
+                        geom.get("coordinates", []),
+                        fill=(219, 234, 254, 128),
+                        outline=(191, 219, 254, 255),
+                        line_width=1,
+                    )
 
-        room_x_clusters, room_y_clusters = _collect_room_axis_clusters(rooms, tolerance=0.25)
+        room_x_clusters, room_y_clusters = _collect_room_axis_clusters(
+            rooms,
+            tolerance=0.25,
+        )
 
-        palette = ["#eef2ff", "#ecfeff", "#f0fdf4", "#fff7ed", "#fef2f2", "#faf5ff", "#fefce8"]
+        palette = [
+            (238, 242, 255, 242),
+            (236, 254, 255, 242),
+            (240, 253, 244, 242),
+            (255, 247, 237, 242),
+            (254, 242, 242, 242),
+            (250, 245, 255, 242),
+            (254, 252, 232, 242),
+        ]
+
         if rooms:
             for idx, feat in enumerate(_features(rooms), start=1):
                 geom = _effective_geometry(feat) or {}
                 if geom.get("type") == "Polygon":
-                    rings = _clean_room_rings(geom.get("coordinates", []), x_clusters=room_x_clusters, y_clusters=room_y_clusters)
-                    _plot_polygon(ax, rings, palette[(idx - 1) % len(palette)], "#94a3b8", alpha=0.95, linewidth=1.0)
-                    # Room labels intentionally disabled to avoid duplicate/small labels
-                    # on the Lovelace map card. Keep the geometry rendering only.
+                    rings = _clean_room_rings(
+                        geom.get("coordinates", []),
+                        x_clusters=room_x_clusters,
+                        y_clusters=room_y_clusters,
+                    )
+                    draw_polygon(
+                        rings,
+                        fill=palette[(idx - 1) % len(palette)],
+                        outline=(148, 163, 184, 255),
+                        line_width=2,
+                    )
 
         if borders:
             for feat in _features(borders):
-                geom = feat.get("geometry", {})
+                geom = feat.get("geometry", {}) or {}
                 if geom.get("type") == "LineString":
                     line = geom.get("coordinates", [])
-                    ax.plot(
-                        [p[0] for p in line],
-                        [p[1] for p in line],
-                        color="#0f172a",
-                        linewidth=1.2,
-                        solid_joinstyle="miter",
-                        solid_capstyle="butt",
-                        antialiased=False,
-                    )
+                    if len(line) >= 2:
+                        draw.line(
+                            [to_pixel(point) for point in line],
+                            fill=(15, 23, 42, 255),
+                            width=2,
+                        )
 
         if policy:
             for feat in _features(policy):
-                geom = feat.get("geometry", {})
+                geom = feat.get("geometry", {}) or {}
                 if geom.get("type") == "Polygon":
-                    _plot_polygon(ax, geom.get("coordinates", []), "#fecaca", "#ef4444", alpha=0.3, linewidth=1.0)
+                    draw_polygon(
+                        geom.get("coordinates", []),
+                        fill=(254, 202, 202, 76),
+                        outline=(239, 68, 68, 255),
+                        line_width=2,
+                    )
 
         if trajectories:
             for feat in _features(trajectories):
-                geom = feat.get("geometry", {})
+                geom = feat.get("geometry", {}) or {}
                 if geom.get("type") == "LineString":
                     line = geom.get("coordinates", [])
-                    ax.plot(
-                        [p[0] for p in line],
-                        [p[1] for p in line],
-                        color="#2563eb",
-                        linewidth=1.1,
-                        solid_joinstyle="miter",
-                        solid_capstyle="butt",
-                        antialiased=False,
-                    )
+                    if len(line) >= 2:
+                        draw.line(
+                            [to_pixel(point) for point in line],
+                            fill=(37, 99, 235, 255),
+                            width=2,
+                        )
 
         if dock:
             for feat in _features(dock):
-                geom = feat.get("geometry", {})
+                geom = feat.get("geometry", {}) or {}
                 if geom.get("type") == "Point":
-                    pt = geom.get("coordinates", [None, None])
-                    if pt[0] is not None and pt[1] is not None:
-                        ax.scatter([pt[0]], [pt[1]], s=80, marker="s", color="#111827")
-                        ax.text(pt[0], pt[1], " Dock", fontsize=8, color="#111827", va="bottom")
+                    point = geom.get("coordinates", [None, None])
+                    if point[0] is not None and point[1] is not None:
+                        x, y = to_pixel(point)
+                        size = 8
+                        draw.rectangle(
+                            (
+                                x - size,
+                                y - size,
+                                x + size,
+                                y + size,
+                            ),
+                            fill=(17, 24, 39, 255),
+                        )
 
-        ax.set_xlim(minx - padx, maxx + padx)
-        ax.set_ylim(miny - pady, maxy + pady)
-        ax.set_aspect("equal", adjustable="box")
-        ax.axis("off")
-        fig.tight_layout()
+                        if show_labels:
+                            draw.text(
+                                (x + size + 4, y - size),
+                                "Dock",
+                                fill=(17, 24, 39, 255),
+                            )
 
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", bbox_inches="tight")
-        plt.close(fig)
-        return buf.getvalue()
+        output = io.BytesIO()
+        image.convert("RGB").save(output, format="PNG", optimize=True)
+        return output.getvalue()
