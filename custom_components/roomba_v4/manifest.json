@@ -13,8 +13,7 @@
   ],
   "requirements": [
     "aiohttp>=3.9.0",
-    "matplotlib>=3.7.0",
     "websockets>=12.0"
   ],
-  "version": "4.0.1"
+  "version": "4.0.2"
 }
