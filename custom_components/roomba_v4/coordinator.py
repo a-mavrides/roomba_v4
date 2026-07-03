@@ -37,14 +37,6 @@ MAP_VERSION_KEYS = (
     "map_version",
     "p2mapv_id",
 )
-MAP_NAME_KEYS = (
-    "name",
-    "map_name",
-    "nickname",
-    "pmap_name",
-    "label",
-    "room_map_name",
-)
 URL_HINT_TOKENS = (
     "p2mapv_geojson.tgz",
     "geojson.tgz",
@@ -1315,12 +1307,14 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         return [pmap for pmap in pmaps if isinstance(pmap, dict)] if isinstance(pmaps, list) else []
 
     def _map_display_name(self, pmap: dict[str, Any], index: int) -> str:
-        for key in MAP_NAME_KEYS:
-            value = pmap.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
+        name = pmap.get("name")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
         map_id = self._pmap_id_value(pmap)
         return f"Map {index + 1} ({map_id[:8]})" if map_id else f"Map {index + 1}"
+
+    def _find_pmap_by_id(self, pmaps: list[dict[str, Any]], map_id: str) -> dict[str, Any] | None:
+        return next((pmap for pmap in pmaps if self._pmap_matches_map_id(pmap, map_id)), None)
 
     def map_options(self) -> list[str]:
         return [self._map_display_name(pmap, idx) for idx, pmap in enumerate(self._pmaps_list())]
@@ -1330,25 +1324,15 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         pmaps = self._pmaps_list()
         if not pmaps:
             return None
-        if self.selected_map_id:
-            for idx, pmap in enumerate(pmaps):
-                if self._pmap_matches_map_id(pmap, self.selected_map_id):
-                    return self._map_display_name(pmap, idx)
         active_map = (self.data or self._restored_data or {}).get("active_map")
         active_map_id = self._pmap_id_value(active_map) if isinstance(active_map, dict) else None
-        if active_map_id:
-            for idx, pmap in enumerate(pmaps):
-                if self._pmap_matches_map_id(pmap, active_map_id):
-                    return self._map_display_name(pmap, idx)
-        return self._map_display_name(pmaps[0], 0)
+        target_id = self.selected_map_id or active_map_id
+        pmap = (self._find_pmap_by_id(pmaps, target_id) if target_id else None) or pmaps[0]
+        return self._map_display_name(pmap, pmaps.index(pmap))
 
     async def async_select_map(self, option: str) -> None:
         pmaps = self._pmaps_list()
-        match = None
-        for idx, pmap in enumerate(pmaps):
-            if self._map_display_name(pmap, idx) == option:
-                match = pmap
-                break
+        match = next((pmap for idx, pmap in enumerate(pmaps) if self._map_display_name(pmap, idx) == option), None)
         if match is None:
             raise CloudApiError(f"Unknown map/floor selection: {option}")
         map_id = self._pmap_id_value(match)

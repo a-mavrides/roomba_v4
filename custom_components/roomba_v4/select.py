@@ -26,12 +26,6 @@ class RoombaMapSelect(RoombaV4Entity, SelectEntity):
         RoombaV4Entity.__init__(self, coordinator, "map_select")
 
     @property
-    def extra_state_attributes(self):
-        return {
-            "note": "Sets which saved floor map the robot should treat as its current location before cleaning. Select this after carrying the robot to a different floor.",
-        }
-
-    @property
     def options(self) -> list[str]:
         return self.coordinator.map_options()
 
