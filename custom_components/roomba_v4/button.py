@@ -166,7 +166,4 @@ class ClearPathTrailButton(RoombaV4Entity, ButtonEntity):
         RoombaV4Entity.__init__(self, coordinator, "clear_path_trail")
 
     async def async_press(self) -> None:
-        camera = getattr(self.coordinator, "map_camera", None)
-        if camera is not None:
-            await camera.async_clear_path_history()
-        self.coordinator.async_update_listeners()
+        await self.coordinator.async_clear_path_trail()
