@@ -2,7 +2,7 @@
 from datetime import timedelta
 
 DOMAIN = "roomba_v4"
-PLATFORMS = ["camera", "sensor", "vacuum", "button", "select", "switch"]
+PLATFORMS = ["camera", "sensor", "vacuum", "button", "select"]
 
 CONF_COUNTRY_CODE = "country_code"
 CONF_ROBOT_BLID = "robot_blid"

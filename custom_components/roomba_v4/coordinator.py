@@ -87,7 +87,6 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         self.map_render_metadata: dict[str, Any] = {}
         self.selected_room: str | None = None
         self.selected_map_id: str | None = None
-        self.active_state_refresh: bool = True
         self.store = Store(hass, STORAGE_VERSION, f"{STORAGE_KEY_PREFIX}.{entry_id}")
         self._restored = False
         self._restored_data: dict[str, Any] = {}
@@ -1015,16 +1014,6 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
                 self.legacy_debug_dir.mkdir(parents=True, exist_ok=True)
             await self.async_start_background_subscriber()
 
-            # Docked/idle robots stop pushing shadow updates, so the passive MQTT snapshot
-            # goes stale until something (e.g. opening the app) wakes them. When enabled,
-            # actively pull current state each poll; the response updates state via the
-            # subscriber's listener path shortly after.
-            if self.active_state_refresh:
-                try:
-                    await self.api.async_request_state_refresh(self.robot_blid)
-                except Exception as err:
-                    _LOGGER.debug("roomba_v4 debug: active state refresh failed: %s", err)
-
             pmaps: Any = []
             try:
                 pmaps = await self.api.get_pmaps(self.robot_blid)
@@ -1172,7 +1161,6 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
             "map_render_metadata": self.map_render_metadata,
                 "selected_room": self.selected_room,
                 "selected_map_id": self.selected_map_id,
-                "active_state_refresh": self.active_state_refresh,
                 "preferred_cleaning_mode": self.preferred_cleaning_mode(),
                 "preferred_suction_level": self.preferred_suction_level(),
                 "preferred_water_level": self.preferred_water_level(),
@@ -1210,7 +1198,6 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         self.map_render_metadata = dict(self._restored_data.get("map_render_metadata") or {})
         self.selected_room = self._restored_data.get("selected_room")
         self.selected_map_id = self._restored_data.get("selected_map_id")
-        self.active_state_refresh = bool(self._restored_data.get("active_state_refresh", True))
         if self.supports_mopping() and not self._restored_data.get("preferred_cleaning_mode"):
             self._restored_data["preferred_cleaning_mode"] = self.derived_cleaning_mode()
         stored_url = self._restored_data.get("s3_map_url")
@@ -1360,45 +1347,8 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
             self._restored_data = {}
         self._restored_data["selected_map_id"] = map_id
         await self._write_debug_json("selected_map.json", {"selected_map_id": map_id, "option": option})
-        # Drop the previous floor's trail so it isn't drawn on the newly selected map.
-        await self.async_clear_path_trail()
         self.async_update_listeners()
         await self.async_request_refresh()
-
-    async def async_set_active_state_refresh(self, enabled: bool) -> None:
-        """Enable/disable actively pulling live state on each poll cycle."""
-        self.active_state_refresh = bool(enabled)
-        base = dict(self.data or self._restored_data or {})
-        base["active_state_refresh"] = self.active_state_refresh
-        self._restored_data = base
-        if isinstance(self.data, dict):
-            self.data["active_state_refresh"] = self.active_state_refresh
-        await self.store.async_save(base)
-        if self.active_state_refresh:
-            try:
-                await self.api.async_request_state_refresh(self.robot_blid)
-            except Exception as err:
-                _LOGGER.debug("roomba_v4 debug: active state refresh (on enable) failed: %s", err)
-        self.async_update_listeners()
-
-    async def async_clear_path_trail(self) -> None:
-        """Reset the accumulated path trail across coordinator state and the camera."""
-        self._last_path_pose = None
-        for store in (self.data, self._restored_data):
-            if not isinstance(store, dict):
-                continue
-            live_state = store.get("live_state")
-            livemap = live_state.get("livemap") if isinstance(live_state, dict) else None
-            if isinstance(livemap, dict):
-                livemap["cumulative_path_points"] = []
-                livemap["cumulative_path_points_count"] = 0
-                livemap["path_points"] = []
-        camera = getattr(self, "map_camera", None)
-        if camera is not None:
-            await camera.async_clear_path_history()
-        if isinstance(self.data, dict):
-            await self.store.async_save(self.data)
-        self.async_update_listeners()
 
     def _resolve_active_map_id(self, robot: dict[str, Any], active_map: dict[str, Any] | None, mission_map: dict[str, Any] | None) -> str | None:
         current = self._first_value(active_map, robot, mission_map, keys=MAP_ID_KEYS)
@@ -1949,8 +1899,6 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
             "resolved": resolved,
             "commanddef": commanddef,
         })
-        # Start each run with a fresh trail so the new mission isn't drawn over the previous one.
-        await self.async_clear_path_trail()
         result = await self.api.publish_commanddef_via_cloud_mqtt(commanddef)
         await self._write_debug_json("send_command_app_segment_clean_result.json", result)
         if self.data is not None:
@@ -2255,8 +2203,6 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
             },
             "commanddef": commanddef,
         })
-        # Start each run with a fresh trail so the new mission isn't drawn over the previous one.
-        await self.async_clear_path_trail()
         result = await self.api.publish_commanddef_via_cloud_mqtt(commanddef)
         await self._write_debug_json("routine_execute_clean_selected_room_result.json", result)
         if self.data is not None:
@@ -2333,8 +2279,6 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
             raise CloudApiError(f"No command definition found for routine {routine_key}")
 
         await self._write_debug_json(f"routine_execute_{debug_prefix}_commanddef.json", commanddef)
-        # Start each run with a fresh trail so the new mission isn't drawn over the previous one.
-        await self.async_clear_path_trail()
         result = await self.api.publish_commanddef_via_cloud_mqtt(commanddef)
         await self._write_debug_json(f"routine_execute_{debug_prefix}_result.json", result)
         return result

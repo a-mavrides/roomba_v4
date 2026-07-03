@@ -3161,35 +3161,6 @@ class IRobotCloudApi:
             "payload_variant": variant_name,
         }
 
-    async def async_request_state_refresh(self, robot_id: str) -> bool:
-        """Publish shadow 'get' requests to actively pull current state, like opening the app.
-
-        Docked/idle robots stop pushing shadow updates, so the passive snapshot goes
-        stale. This pokes the robot's named shadows; the responses arrive on the main
-        subscriber read loop and update live state through the normal listener path, so
-        we only publish here (no capture) to avoid racing the subscriber's own reads.
-        Returns True if the get requests were sent.
-        """
-        ws = self._subscriber_ws
-        if ws is None or getattr(ws, "closed", False) or self._subscriber_stop.is_set():
-            return False
-        refresh_topics = [
-            topic for topic in self._cloud_get_topics(robot_id)
-            if "/shadow/name/ro-currentstate/get" in topic or "/shadow/name/ro-stats/get" in topic
-        ]
-        for topic in refresh_topics:
-            publish_packet = self._mqtt_publish_packet(topic, b"{}")
-            try:
-                async with self._subscriber_send_lock:
-                    if self._subscriber_ws is None or getattr(self._subscriber_ws, "closed", False):
-                        return False
-                    await self._subscriber_ws.send(publish_packet)
-            except Exception as err:
-                _LOGGER.debug("roomba_v4 state refresh publish failed robot_id=%s: %s", robot_id, err)
-                return False
-            await asyncio.sleep(0.1)
-        return True
-
     async def _send_post_command_shadow_refresh(self, robot_id: str) -> None:
         """Best-effort delayed refresh after commands.
 
