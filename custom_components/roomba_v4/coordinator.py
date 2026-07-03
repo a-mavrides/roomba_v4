@@ -58,6 +58,18 @@ DIRECT_URL_KEYS = (
     "uri",
 )
 
+# This model periodically emits brief phantom run->dock->charge bursts while parked on
+# the dock (battery stays full, sqft stays 0, position never leaves the dock). We only
+# believe a spontaneous switch away from "docked" once the active state persists past the
+# phantom duration OR the robot actually drives away from the dock. A user/schedule start
+# is trusted immediately via COMMAND_TRUST_WINDOW so the on-dock recalibration phase
+# (where no fresh position is reported yet) isn't mistaken for a phantom.
+PHANTOM_ACTIVE_HOLD = timedelta(seconds=90)
+DOCK_ESCAPE_DISTANCE = 0.75
+COMMAND_TRUST_WINDOW = timedelta(seconds=150)
+# Only these states exhibit the phantom flicker; error/paused/idle must never be held back.
+DEBOUNCED_STATES = {"cleaning", "returning"}
+
 
 class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
     def __init__(
@@ -98,6 +110,9 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         self._last_livemap_message_at: datetime | None = None
         self._last_good_pose: dict[str, Any] | None = None
         self._last_path_pose: dict[str, Any] | None = None
+        self._docked_anchor: dict[str, float] | None = None
+        self._active_since: datetime | None = None
+        self._last_mission_command_at: datetime | None = None
         self.api.add_live_state_listener(self._handle_live_state_update)
         self._last_event_signature: str | None = None
         self._last_event_at: datetime | None = None
@@ -535,6 +550,62 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
             return "error"
         return state
 
+    def _debounce_vacuum_state(self, raw_state: str, status: dict[str, Any]) -> str:
+        """Filter the robot's brief phantom run/dock bursts while it's parked on the dock.
+
+        Only the active-mission states flicker as phantoms, so error/paused/idle always
+        pass straight through. A spontaneous switch to cleaning/returning is believed only
+        once a start/return command was recently issued, OR the robot moved away from the
+        dock, OR the active state persisted past the phantom duration. When a phantom is
+        suppressed the status message is snapped to docked so the sensors stay consistent
+        with the vacuum state. Mutates ``status`` in that case.
+        """
+        now = datetime.now(tz=UTC)
+        x = status.get("x")
+        y = status.get("y")
+        has_pos = isinstance(x, (int, float)) and isinstance(y, (int, float))
+
+        if raw_state == "docked":
+            self._active_since = None
+            if has_pos:
+                self._docked_anchor = {"x": float(x), "y": float(y)}
+            return "docked"
+
+        # Never hold back error/paused/idle/etc; the phantom only affects mission states.
+        if raw_state not in DEBOUNCED_STATES:
+            return raw_state
+
+        # Trust a recently commanded start/return. Covers the on-dock recalibration phase
+        # where no fresh position is reported yet (phantom bursts carry no command).
+        if self._last_mission_command_at is not None and (now - self._last_mission_command_at) < COMMAND_TRUST_WINDOW:
+            self._active_since = None
+            self._docked_anchor = None
+            return raw_state
+
+        # No recent dock anchor: nothing to debounce against, trust the raw state.
+        if self._docked_anchor is None:
+            return raw_state
+
+        # Actually drove away from the dock -> real mission, accept immediately.
+        if has_pos:
+            dx = float(x) - self._docked_anchor["x"]
+            dy = float(y) - self._docked_anchor["y"]
+            if (dx * dx + dy * dy) ** 0.5 > DOCK_ESCAPE_DISTANCE:
+                self._active_since = None
+                self._docked_anchor = None
+                return raw_state
+
+        # Still at the dock with no command: only believe it once it has persisted.
+        if self._active_since is None:
+            self._active_since = now
+        elif (now - self._active_since) >= PHANTOM_ACTIVE_HOLD:
+            self._active_since = None
+            self._docked_anchor = None
+            return raw_state
+
+        status["status_message"] = "Roomba is docked"
+        return "docked"
+
     def _build_live_status_block(self, live_state: dict[str, Any], previous_status: dict[str, Any] | None = None) -> dict[str, Any]:
         cms = live_state.get("cleanMissionStatus") if isinstance(live_state.get("cleanMissionStatus"), dict) else {}
         stable_pose = self._stabilize_pose(live_state, previous_status)
@@ -658,6 +729,8 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         preserve_seconds: int = 8,
     ) -> None:
         now = datetime.now(tz=UTC)
+        if command_name in {"clean_all", "resume", "dock"}:
+            self._last_mission_command_at = now
         base = dict(self.data or self._restored_data or {})
         status = dict(base.get("status") or {})
         if mission_phase is not None:
@@ -934,6 +1007,7 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         else:
             status = self._build_live_status_block(live_state, base.get("status") or {})
             vacuum_state = self._normalize_vacuum_state_from_status(live_state, status)
+            vacuum_state = self._debounce_vacuum_state(vacuum_state, status)
             status["vacuum_state"] = vacuum_state
             base["status"] = status
             base["vacuum_state"] = vacuum_state
@@ -1131,6 +1205,7 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
             live_state = self.api.get_live_state_snapshot()
             status_block = self._build_live_status_block(live_state)
             vacuum_state = self._normalize_vacuum_state_from_status(live_state, status_block)
+            vacuum_state = self._debounce_vacuum_state(vacuum_state, status_block)
             status_block["vacuum_state"] = vacuum_state
             await self._write_debug_json("live_state_snapshot.json", live_state)
             await self._write_debug_json("live_status_block.json", status_block)
@@ -1951,6 +2026,7 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         })
         # Start each run with a fresh trail so the new mission isn't drawn over the previous one.
         await self.async_clear_path_trail()
+        self._last_mission_command_at = datetime.now(tz=UTC)
         result = await self.api.publish_commanddef_via_cloud_mqtt(commanddef)
         await self._write_debug_json("send_command_app_segment_clean_result.json", result)
         if self.data is not None:
@@ -2257,6 +2333,7 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         })
         # Start each run with a fresh trail so the new mission isn't drawn over the previous one.
         await self.async_clear_path_trail()
+        self._last_mission_command_at = datetime.now(tz=UTC)
         result = await self.api.publish_commanddef_via_cloud_mqtt(commanddef)
         await self._write_debug_json("routine_execute_clean_selected_room_result.json", result)
         if self.data is not None:
@@ -2335,6 +2412,7 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         await self._write_debug_json(f"routine_execute_{debug_prefix}_commanddef.json", commanddef)
         # Start each run with a fresh trail so the new mission isn't drawn over the previous one.
         await self.async_clear_path_trail()
+        self._last_mission_command_at = datetime.now(tz=UTC)
         result = await self.api.publish_commanddef_via_cloud_mqtt(commanddef)
         await self._write_debug_json(f"routine_execute_{debug_prefix}_result.json", result)
         return result
