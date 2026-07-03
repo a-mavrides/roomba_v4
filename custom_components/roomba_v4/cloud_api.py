@@ -1762,13 +1762,12 @@ class IRobotCloudApi:
                 add("current.state.reported", current_state.get("reported"))
                 add("current.state.desired", current_state.get("desired"))
 
-        previous = payload.get("previous")
-        if isinstance(previous, dict):
-            prev_state = previous.get("state")
-            if isinstance(prev_state, dict):
-                add("previous.state", prev_state)
-                add("previous.state.reported", prev_state.get("reported"))
-                add("previous.state.desired", prev_state.get("desired"))
+        # NOTE: deliberately ignore payload["previous"]. In AWS IoT shadow
+        # update/documents messages the "previous" block is the state *before*
+        # the change (stale by definition). Because fragments are deep-merged in
+        # order, ingesting it would let an old cleanMissionStatus (e.g. phase=run
+        # from the last mission) clobber the current reported state and make a
+        # docked robot look like it's still cleaning.
 
         metadata = payload.get("metadata")
         if isinstance(metadata, dict):
