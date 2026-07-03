@@ -37,6 +37,14 @@ MAP_VERSION_KEYS = (
     "map_version",
     "p2mapv_id",
 )
+MAP_NAME_KEYS = (
+    "name",
+    "map_name",
+    "nickname",
+    "pmap_name",
+    "label",
+    "room_map_name",
+)
 URL_HINT_TOKENS = (
     "p2mapv_geojson.tgz",
     "geojson.tgz",
@@ -86,6 +94,7 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         self.rooms: list[str] = []
         self.map_render_metadata: dict[str, Any] = {}
         self.selected_room: str | None = None
+        self.selected_map_id: str | None = None
         self.store = Store(hass, STORAGE_VERSION, f"{STORAGE_KEY_PREFIX}.{entry_id}")
         self._restored = False
         self._restored_data: dict[str, Any] = {}
@@ -1153,6 +1162,7 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
                 "room_info": self.room_info,
             "map_render_metadata": self.map_render_metadata,
                 "selected_room": self.selected_room,
+                "selected_map_id": self.selected_map_id,
                 "preferred_cleaning_mode": self.preferred_cleaning_mode(),
                 "preferred_suction_level": self.preferred_suction_level(),
                 "preferred_water_level": self.preferred_water_level(),
@@ -1189,6 +1199,7 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         self.rooms = room_names_from_info(self.room_info) or list(self._restored_data.get("rooms") or [])
         self.map_render_metadata = dict(self._restored_data.get("map_render_metadata") or {})
         self.selected_room = self._restored_data.get("selected_room")
+        self.selected_map_id = self._restored_data.get("selected_map_id")
         if self.supports_mopping() and not self._restored_data.get("preferred_cleaning_mode"):
             self._restored_data["preferred_cleaning_mode"] = self.derived_cleaning_mode()
         stored_url = self._restored_data.get("s3_map_url")
@@ -1210,6 +1221,10 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
                 yield node_path, node
 
     def _select_active_map(self, robot: dict[str, Any], pmaps: Any, mission_history: Any) -> dict[str, Any] | None:
+        if self.selected_map_id and isinstance(pmaps, list):
+            for pmap in pmaps:
+                if isinstance(pmap, dict) and self._pmap_matches_map_id(pmap, self.selected_map_id):
+                    return pmap
         if isinstance(pmaps, list):
             for pmap in pmaps:
                 if isinstance(pmap, dict) and (
@@ -1284,6 +1299,66 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
                     if value not in (None, ""):
                         return str(value)
         return None
+
+    def _pmap_id_value(self, pmap: dict[str, Any]) -> str | None:
+        return self._first_value(pmap, keys=MAP_ID_KEYS)
+
+    def _pmap_matches_map_id(self, pmap: dict[str, Any], map_id: str) -> bool:
+        for key in MAP_ID_KEYS:
+            value = pmap.get(key)
+            if value not in (None, "") and str(value) == str(map_id):
+                return True
+        return False
+
+    def _pmaps_list(self) -> list[dict[str, Any]]:
+        pmaps = (self.data or self._restored_data or {}).get("pmaps")
+        return [pmap for pmap in pmaps if isinstance(pmap, dict)] if isinstance(pmaps, list) else []
+
+    def _map_display_name(self, pmap: dict[str, Any], index: int) -> str:
+        for key in MAP_NAME_KEYS:
+            value = pmap.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        map_id = self._pmap_id_value(pmap)
+        return f"Map {index + 1} ({map_id[:8]})" if map_id else f"Map {index + 1}"
+
+    def map_options(self) -> list[str]:
+        return [self._map_display_name(pmap, idx) for idx, pmap in enumerate(self._pmaps_list())]
+
+    @property
+    def selected_map(self) -> str | None:
+        pmaps = self._pmaps_list()
+        if not pmaps:
+            return None
+        if self.selected_map_id:
+            for idx, pmap in enumerate(pmaps):
+                if self._pmap_matches_map_id(pmap, self.selected_map_id):
+                    return self._map_display_name(pmap, idx)
+        active_map = (self.data or self._restored_data or {}).get("active_map")
+        active_map_id = self._pmap_id_value(active_map) if isinstance(active_map, dict) else None
+        if active_map_id:
+            for idx, pmap in enumerate(pmaps):
+                if self._pmap_matches_map_id(pmap, active_map_id):
+                    return self._map_display_name(pmap, idx)
+        return self._map_display_name(pmaps[0], 0)
+
+    async def async_select_map(self, option: str) -> None:
+        pmaps = self._pmaps_list()
+        match = None
+        for idx, pmap in enumerate(pmaps):
+            if self._map_display_name(pmap, idx) == option:
+                match = pmap
+                break
+        if match is None:
+            raise CloudApiError(f"Unknown map/floor selection: {option}")
+        map_id = self._pmap_id_value(match)
+        self.selected_map_id = map_id
+        if self._restored_data is None:
+            self._restored_data = {}
+        self._restored_data["selected_map_id"] = map_id
+        await self._write_debug_json("selected_map.json", {"selected_map_id": map_id, "option": option})
+        self.async_update_listeners()
+        await self.async_request_refresh()
 
     def _resolve_active_map_id(self, robot: dict[str, Any], active_map: dict[str, Any] | None, mission_map: dict[str, Any] | None) -> str | None:
         current = self._first_value(active_map, robot, mission_map, keys=MAP_ID_KEYS)
