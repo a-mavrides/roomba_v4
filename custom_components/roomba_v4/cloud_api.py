@@ -2043,12 +2043,17 @@ class IRobotCloudApi:
             except asyncio.TimeoutError:
                 continue
             packets.append(packet)
+            # Log the real packet payload. Do NOT wrap it with the debug capture phase:
+            # _append_event_packet ingests payload_json into live state, and the livemap
+            # fragment extractor treats any top-level "phase" key as cleanMissionStatus.phase,
+            # which would poison the mission phase with the debug label (e.g. "post_subscribe_warmup").
             await self._append_event_packet({
                 "ts": datetime.now(tz=UTC).isoformat(),
                 "type": "message" if packet.get("type") == 3 else f"packet_{packet.get('type')}",
                 "topic": packet.get("topic"),
-                "payload_json": {"phase": phase, **packet},
+                "payload_json": packet.get("payload_json"),
                 "payload_text": packet.get("payload_text"),
+                "capture_phase": phase,
             })
             self._merge_live_state_from_packet(packet)
         return packets
