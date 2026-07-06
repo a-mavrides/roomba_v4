@@ -2374,10 +2374,11 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
             "robot_id": self.robot_blid,
             "command": "start",
             "params": params,
-            # Use the envelope variant (params at top level) rather than commanddef_wrapped,
-            # which buries params.operatingMode inside a "commanddef" object where the
-            # firmware doesn't read it - causing Vacuum+Mop clean-all to run vacuum-only.
-            "_preferred_payload_variant": "robot_command_envelope",
+            # NOTE: robot_command_envelope was tried to fix Vacuum+Mop being ignored, but this
+            # firmware does not accept it for CLEAN_ALL (the clean didn't start at all), so we
+            # keep commanddef_wrapped which reliably starts the clean. The mop-mode issue needs
+            # the exact payload the app sends (see decompiled-app investigation).
+            "_preferred_payload_variant": "commanddef_wrapped",
         }
         if p2map_id:
             commanddef["p2map_id"] = p2map_id
