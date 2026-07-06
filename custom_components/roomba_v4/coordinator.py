@@ -2135,9 +2135,12 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         return {}
 
     def _build_region_cleaning_params(self, region_id: str | None = None) -> dict[str, Any]:
+        # Match the app's per-region params shape (decompiled favorites_json_data.json):
+        #   {scrub, padWetness:{disposable,reusable}, twoPass, noAutoPasses, operatingMode}
         params = self._default_region_params_from_clean_score(region_id)
-        if "twoPass" not in params:
-            params["twoPass"] = False
+        params.setdefault("scrub", 0)
+        params.setdefault("twoPass", False)
+        params.setdefault("noAutoPasses", True)
 
         operating_mode = self._preferred_operating_mode_value()
         if operating_mode is not None:
@@ -2150,12 +2153,18 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         if suction_level is not None:
             params["suctionLevel"] = suction_level
 
+        prev_wetness = params.get("padWetness") if isinstance(params.get("padWetness"), dict) else {}
+        prev_level = prev_wetness.get("disposable")
+        if prev_level is None:
+            prev_level = prev_wetness.get("reusable")
+        if prev_level is None:
+            prev_level = prev_wetness.get("padPlate")
         water_level = self._normalize_water_level_value(
             self.preferred_water_level(),
-            fallback=(int((params.get("padWetness") or {}).get("padPlate")) if isinstance(params.get("padWetness"), dict) and (params.get("padWetness") or {}).get("padPlate") is not None else None),
+            fallback=(int(prev_level) if prev_level is not None else None),
         )
         if self.supports_mopping() and operating_mode in {1, 3, 6} and water_level is not None:
-            params["padWetness"] = {"padPlate": water_level}
+            params["padWetness"] = {"disposable": water_level, "reusable": water_level}
         elif operating_mode == 2:
             params.pop("padWetness", None)
 
