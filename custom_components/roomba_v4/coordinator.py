@@ -2359,7 +2359,13 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         robot_state = self.data.get("robot") if isinstance(self.data, dict) else None
         p2map_id = (self.data.get("active_map_id") if isinstance(self.data, dict) else None) or ((robot_state or {}).get("p2map_id") if isinstance(robot_state, dict) else None)
         pmapv_id = (self.data.get("active_map_version") if isinstance(self.data, dict) else None) or ((((robot_state or {}).get("user_p2mapv_id") or (robot_state or {}).get("pmapv_id")) if isinstance(robot_state, dict) else None))
-        params = self._build_top_level_cleaning_params()
+        # Mirror the app's clean-everything command (from decompiled favorites_json_data.json):
+        #   {command:"start", params:{operatingMode:6, ...}, select_all:true}
+        # operatingMode lives at the top level of params (NOT nested under a commanddef), and
+        # select_all:true is what tells the robot to clean the whole map. Missing select_all is
+        # why the earlier robot_command_envelope attempt started nothing; burying params under
+        # commanddef_wrapped is why the mode was ignored and it ran vacuum-only.
+        params: dict[str, Any] = {}
         operating_mode = self._preferred_operating_mode_value()
         if operating_mode is not None:
             params["operatingMode"] = operating_mode
@@ -2368,17 +2374,14 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
             params["suctionLevel"] = suction_level
         water_level = self._normalize_water_level_value(self.preferred_water_level())
         if self.supports_mopping() and operating_mode in {1, 3, 6} and water_level is not None:
-            params["padWetness"] = {"padPlate": water_level}
-        params["routine_type"] = "CLEAN_ALL"
+            # The app uses {disposable, reusable}, not {padPlate}.
+            params["padWetness"] = {"disposable": water_level, "reusable": water_level}
         commanddef: dict[str, Any] = {
             "robot_id": self.robot_blid,
             "command": "start",
             "params": params,
-            # NOTE: robot_command_envelope was tried to fix Vacuum+Mop being ignored, but this
-            # firmware does not accept it for CLEAN_ALL (the clean didn't start at all), so we
-            # keep commanddef_wrapped which reliably starts the clean. The mop-mode issue needs
-            # the exact payload the app sends (see decompiled-app investigation).
-            "_preferred_payload_variant": "commanddef_wrapped",
+            "select_all": True,
+            "_preferred_payload_variant": "robot_command_envelope",
         }
         if p2map_id:
             commanddef["p2map_id"] = p2map_id
