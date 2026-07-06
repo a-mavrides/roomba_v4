@@ -1203,6 +1203,20 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
             await self._write_debug_json("resolved_room_info.json", self.room_info)
 
             live_state = self.api.get_live_state_snapshot()
+            # Carry the accumulated path trail across the poll rebuild. The API snapshot is
+            # composed from source fragments and never contains cumulative_path_points (those
+            # are built in _handle_live_state_update), so without this the trail is wiped on
+            # every poll - which becomes very visible once the state is correctly "cleaning"
+            # and the poll interval drops to 20s.
+            prev_live_state = (self.data or self._restored_data or {}).get("live_state")
+            prev_livemap = prev_live_state.get("livemap") if isinstance(prev_live_state, dict) else None
+            if isinstance(prev_livemap, dict) and prev_livemap.get("cumulative_path_points"):
+                cur_livemap = live_state.get("livemap") if isinstance(live_state.get("livemap"), dict) else {}
+                if not isinstance(cur_livemap, dict):
+                    cur_livemap = {}
+                cur_livemap["cumulative_path_points"] = prev_livemap.get("cumulative_path_points")
+                cur_livemap["cumulative_path_points_count"] = prev_livemap.get("cumulative_path_points_count")
+                live_state["livemap"] = cur_livemap
             status_block = self._build_live_status_block(live_state)
             vacuum_state = self._normalize_vacuum_state_from_status(live_state, status_block)
             vacuum_state = self._debounce_vacuum_state(vacuum_state, status_block)
