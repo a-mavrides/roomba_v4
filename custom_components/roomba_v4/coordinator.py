@@ -2393,13 +2393,18 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         feature_ctx = self._room_feature_context(room, region_candidates)
         region_id = str(region_candidates[0])
         operating_mode = self._preferred_operating_mode_value()
-        region_params: dict[str, Any] = {}
+        # App's per-region params (favorites_json_data.json): scrub, twoPass, noAutoPasses,
+        # operatingMode, and padWetness{disposable,reusable}. Region padWetness IS accepted
+        # (unlike top-level select_all) and is what makes the region actually mop; no
+        # suctionLevel (that's a separate preference).
+        region_params: dict[str, Any] = {"scrub": 0, "twoPass": False, "noAutoPasses": True}
         if operating_mode is not None:
             region_params["operatingMode"] = operating_mode
+        water_level = self._normalize_water_level_value(self.preferred_water_level())
+        if self.supports_mopping() and operating_mode in {1, 3, 6} and water_level is not None:
+            region_params["padWetness"] = {"disposable": water_level, "reusable": water_level}
 
-        # Same fix as clean-all: send via the app_clean variant (the only one this robot
-        # accepts) with MINIMAL per-region params - operatingMode only. The old envelope
-        # variant plus suctionLevel/padWetness/top-level profile made room clean do nothing.
+        # Same transport as clean-all: the app_clean variant (the only one this robot accepts).
         commanddef: dict[str, Any] = {
             "robot_id": self.robot_blid,
             "command": "start",
