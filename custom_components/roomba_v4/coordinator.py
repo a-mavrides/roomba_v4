@@ -2393,19 +2393,19 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         feature_ctx = self._room_feature_context(room, region_candidates)
         region_id = str(region_candidates[0])
         operating_mode = self._preferred_operating_mode_value()
-        # MINIMAL region params only. This robot rejects padWetness/scrub/twoPass/noAutoPasses
-        # in a region command (it does nothing), so we send operatingMode alone. The robot
-        # uses its SAVED per-room mode anyway, so region mop must be configured in the app.
-        region_params: dict[str, Any] = {}
+        # Combine what works: TOP-LEVEL operatingMode (the proven clean-all mop trigger) plus
+        # regions purely for targeting (no per-region params, which this robot rejects). The
+        # global operatingMode applies to the targeted region.
+        params: dict[str, Any] = {}
         if operating_mode is not None:
-            region_params["operatingMode"] = operating_mode
+            params["operatingMode"] = operating_mode
 
-        # Same transport as clean-all: the app_clean variant (the only one this robot accepts).
         commanddef: dict[str, Any] = {
             "robot_id": self.robot_blid,
             "command": "start",
+            "params": params,
             "regions": [
-                {"region_id": region_id, "type": "rid", "params": region_params}
+                {"region_id": region_id, "type": "rid"}
             ],
             "_preferred_payload_variant": "app_clean",
         }
