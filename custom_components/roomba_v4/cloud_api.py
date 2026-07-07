@@ -3358,6 +3358,40 @@ class IRobotCloudApi:
         commanddef = {"robot_id": robot_id, "command": command, "params": {}}
         return await self.publish_commanddef_via_cloud_mqtt(commanddef)
 
+    async def async_set_robot_preferences(self, robot_id: str, prefs: dict[str, Any]) -> dict[str, Any]:
+        """Set robot config preferences (e.g. carpetBoost/vacHigh suction).
+
+        The decompiled core keys suction as carpetBoost/vacHigh in the robot's config
+        state, not suctionLevel in the clean command. iRobot preferences are a delta to
+        the config state, published as {"state": {...}} to the command topic. Best-effort.
+        """
+        if not robot_id or not isinstance(prefs, dict) or not prefs:
+            return {"status": "skipped"}
+        return await self._publish_raw_body(robot_id, {"state": prefs}, label="preferences_delta")
+
+    async def _publish_raw_body(self, robot_id: str, body: dict[str, Any], *, label: str = "raw") -> dict[str, Any]:
+        async with self._command_send_lock:
+            try:
+                await self._ensure_managed_command_session(robot_id)
+            except Exception as err:
+                return {"status": "failed", "error": str(err)}
+            ws = self._subscriber_ws
+            if ws is None or getattr(ws, "closed", False):
+                return {"status": "failed", "error": "no_session"}
+            irbt = self.deployment.get("irbtTopics") or f"{self.deployment.get('svcDeplId', 'v007')}-irbthbu"
+            topic = f"{irbt}/things/{robot_id}/cmd"
+            payload_bytes = json.dumps(body, separators=(",", ":")).encode("utf-8")
+            packet = self._mqtt_publish_packet(topic, payload_bytes)
+            async with self._subscriber_send_lock:
+                if self._subscriber_ws is None or getattr(self._subscriber_ws, "closed", False):
+                    return {"status": "failed", "error": "session_closed"}
+                await self._subscriber_ws.send(packet)
+            await self._write_runtime_debug("raw_publish", {
+                "robot_id": robot_id, "label": label, "topic": topic, "body": body,
+                "ts": datetime.now(tz=UTC).isoformat(),
+            })
+            return {"status": "published", "topic": topic, "label": label}
+
     def get_cloud_transport_debug_info(self, robot_id: str) -> dict[str, Any]:
         login = self.last_login_response or {}
         robots = login.get("robots") if isinstance(login.get("robots"), dict) else {}

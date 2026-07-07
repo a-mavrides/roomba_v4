@@ -178,6 +178,26 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         await self.store.async_save(base)
         self.async_update_listeners()
 
+    def _suction_carpet_vac(self, option: str | None = None) -> dict[str, bool] | None:
+        """Map a suction level to the robot's carpetBoost/vacHigh booleans (the real keys).
+
+        iRobot suction is two booleans, not a level: lowest = Eco {false,false},
+        middle = Automatic {true,false}, highest = Performance {false,true}.
+        """
+        opts = self.suction_level_options()
+        if not opts:
+            return None
+        pref = option or self.preferred_suction_level()
+        try:
+            idx = opts.index(pref)
+        except (ValueError, TypeError):
+            idx = 0
+        if idx <= 0:
+            return {"carpetBoost": False, "vacHigh": False}
+        if idx >= len(opts) - 1:
+            return {"carpetBoost": False, "vacHigh": True}
+        return {"carpetBoost": True, "vacHigh": False}
+
     async def async_set_preferred_suction_level(self, option: str) -> None:
         if option not in self.suction_level_options():
             raise CloudApiError(f"Unsupported suction level: {option}")
@@ -187,6 +207,14 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         if isinstance(self.data, dict):
             self.data["preferred_suction_level"] = option
         await self.store.async_save(base)
+        # Suction is a robot preference (carpetBoost/vacHigh), not a clean-command field, so
+        # push it to the robot now - the way the app's setPreferences does.
+        prefs = self._suction_carpet_vac(option)
+        if prefs is not None:
+            try:
+                await self.api.async_set_robot_preferences(self.robot_blid, prefs)
+            except Exception as err:
+                _LOGGER.debug("roomba_v4 debug: set suction preference failed: %s", err)
         self.async_update_listeners()
 
     async def async_set_preferred_water_level(self, option: str) -> None:
