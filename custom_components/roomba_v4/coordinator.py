@@ -484,7 +484,12 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
             return f"Roomba needs attention (error {error})"
         if not_ready not in (None, 0, "0"):
             return f"Roomba is not ready ({not_ready})"
-        if phase in {"run", "resume", "new", "explore", "evac", "hmusr"}:
+        # The app treats these dock activities as distinct states, not "cleaning".
+        if "evac" in phase:
+            return "Roomba is emptying the bin"
+        if "dry" in phase:
+            return "Roomba is drying the mop pad"
+        if phase in {"run", "resume", "new", "explore", "hmusr"}:
             return "Roomba is cleaning"
         if phase in {"pause", "paused"}:
             return "Roomba is paused"
