@@ -2443,18 +2443,15 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         return result
 
     def _build_clean_all_commanddef(self) -> dict[str, Any]:
-        # Match the app's clean-everything command byte-for-byte (decompiled favorite):
-        #   {command:"start", params:{operatingMode:6[, padWetness]}, select_all:true}
-        # Minimal params ONLY - suction is a separate preference (carpetBoost/vacHigh), and
-        # p2map_id/routine_type/suctionLevel are NOT sent (an invalid field made the earlier
-        # envelope attempt do nothing). Sent via the app_clean variant (top-level params).
+        # Match the app's clean-everything favorite byte-for-byte:
+        #   {command:"start", params:{operatingMode:6}, select_all:true}
+        # operatingMode ONLY. Adding padWetness made the mop command get rejected (it started
+        # nothing, while vacuum-only started fine) - the app's select_all command carries no
+        # padWetness; wetness comes from the saved config. Suction is a separate preference.
         params: dict[str, Any] = {}
         operating_mode = self._preferred_operating_mode_value()
         if operating_mode is not None:
             params["operatingMode"] = operating_mode
-        water_level = self._normalize_water_level_value(self.preferred_water_level())
-        if self.supports_mopping() and operating_mode in {1, 3, 6} and water_level is not None:
-            params["padWetness"] = {"disposable": water_level, "reusable": water_level}
         return {
             "robot_id": self.robot_blid,
             "command": "start",
