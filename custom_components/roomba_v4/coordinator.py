@@ -2443,36 +2443,25 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         return result
 
     def _build_clean_all_commanddef(self) -> dict[str, Any]:
-        robot_state = self.data.get("robot") if isinstance(self.data, dict) else None
-        p2map_id = (self.data.get("active_map_id") if isinstance(self.data, dict) else None) or ((robot_state or {}).get("p2map_id") if isinstance(robot_state, dict) else None)
-        pmapv_id = (self.data.get("active_map_version") if isinstance(self.data, dict) else None) or ((((robot_state or {}).get("user_p2mapv_id") or (robot_state or {}).get("pmapv_id")) if isinstance(robot_state, dict) else None))
-        # commanddef_wrapped is the only variant this robot's /cmd topic accepts to actually
-        # start a clean (robot_command_envelope silently does nothing). It ignores the nested
-        # params.operatingMode, so clean-all runs vacuum-only regardless of mode selection.
-        # Getting mop into clean-all needs the app's real execution transport (see notes), not
-        # just a different payload shape - so keep the variant that reliably starts.
-        params = self._build_top_level_cleaning_params()
+        # Match the app's clean-everything command byte-for-byte (decompiled favorite):
+        #   {command:"start", params:{operatingMode:6[, padWetness]}, select_all:true}
+        # Minimal params ONLY - suction is a separate preference (carpetBoost/vacHigh), and
+        # p2map_id/routine_type/suctionLevel are NOT sent (an invalid field made the earlier
+        # envelope attempt do nothing). Sent via the app_clean variant (top-level params).
+        params: dict[str, Any] = {}
         operating_mode = self._preferred_operating_mode_value()
         if operating_mode is not None:
             params["operatingMode"] = operating_mode
-        suction_level = self._normalize_suction_level_value(self.preferred_suction_level())
-        if suction_level is not None:
-            params["suctionLevel"] = suction_level
         water_level = self._normalize_water_level_value(self.preferred_water_level())
         if self.supports_mopping() and operating_mode in {1, 3, 6} and water_level is not None:
             params["padWetness"] = {"disposable": water_level, "reusable": water_level}
-        params["routine_type"] = "CLEAN_ALL"
-        commanddef: dict[str, Any] = {
+        return {
             "robot_id": self.robot_blid,
             "command": "start",
             "params": params,
-            "_preferred_payload_variant": "commanddef_wrapped",
+            "select_all": True,
+            "_preferred_payload_variant": "app_clean",
         }
-        if p2map_id:
-            commanddef["p2map_id"] = p2map_id
-        if pmapv_id:
-            commanddef["user_p2mapv_id"] = pmapv_id
-        return commanddef
 
     async def async_start_clean_all(self) -> dict[str, Any]:
         result = await self.async_execute_named_routine("clean_all")

@@ -1349,7 +1349,7 @@ class IRobotCloudApi:
 
     def _preferred_payload_order(self, commanddef: dict[str, Any]) -> list[str]:
         preferred = commanddef.get("_preferred_payload_variant")
-        base = ["raw_commanddef_payload", "robot_command_envelope", "commanddef_wrapped", "apk_commanddefs_upper", "apk_commanddefs_lower", "mission_shadow_desired"]
+        base = ["raw_commanddef_payload", "robot_command_envelope", "commanddef_wrapped", "apk_commanddefs_upper", "apk_commanddefs_lower", "mission_shadow_desired", "app_clean"]
         if isinstance(preferred, str) and preferred in base:
             return [preferred] + [name for name in base if name != preferred]
         return base
@@ -1635,7 +1635,23 @@ class IRobotCloudApi:
         if "select_all" in commanddef:
             payload_obj["select_all"] = bool(commanddef.get("select_all"))
 
+        # Byte-for-byte minimal match of the app's clean command (decompiled favorite):
+        #   {command, initiator, time, params:{operatingMode,...}, select_all}
+        # No p2map_id/null, no wrapping, no invalid fields - the app sends exactly this.
+        app_clean: dict[str, Any] = {
+            "command": command_lower,
+            "initiator": "localApp",
+            "time": payload_obj["time"],
+        }
+        if isinstance(params, dict) and params:
+            app_clean["params"] = params
+        if isinstance(regions, list) and regions:
+            app_clean["regions"] = regions
+        if "select_all" in commanddef:
+            app_clean["select_all"] = bool(commanddef.get("select_all"))
+
         variants: list[tuple[str, dict[str, Any]]] = [
+            ("app_clean", app_clean),
             ("apk_commanddefs_upper", {"commanddefs": [routine_upper]}),
             ("apk_commanddefs_lower", {"commanddefs": [routine_lower]}),
             ("raw_commanddef_payload", payload_obj),
