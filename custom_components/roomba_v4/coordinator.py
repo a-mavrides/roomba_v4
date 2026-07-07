@@ -113,6 +113,7 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         self._docked_anchor: dict[str, float] | None = None
         self._active_since: datetime | None = None
         self._last_mission_command_at: datetime | None = None
+        self._last_livemap_traj_key: str | None = None
         self.api.add_live_state_listener(self._handle_live_state_update)
         self._last_event_signature: str | None = None
         self._last_event_at: datetime | None = None
@@ -1226,6 +1227,14 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
             vacuum_state = self._normalize_vacuum_state_from_status(live_state, status_block)
             vacuum_state = self._debounce_vacuum_state(vacuum_state, status_block)
             status_block["vacuum_state"] = vacuum_state
+
+            # During an active mission, pull the current trajectory bundle like the app does
+            # (full live path) rather than relying only on sparse MQTT poses.
+            if vacuum_state in {"cleaning", "returning"}:
+                try:
+                    await self.async_refresh_livemap_trajectory()
+                except Exception as err:
+                    _LOGGER.debug("roomba_v4 debug: livemap trajectory refresh failed: %s", err)
             await self._write_debug_json("live_state_snapshot.json", live_state)
             await self._write_debug_json("live_status_block.json", status_block)
 
@@ -1792,6 +1801,42 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         self.last_map_refresh = datetime.now(tz=UTC).isoformat()
         self.async_update_listeners()
 
+
+    async def async_refresh_livemap_trajectory(self) -> None:
+        """Render the current livemap trajectory bundle, the way the app draws the live path.
+
+        The /v1/p2maps/livemap response carries a presigned URL to the current trajectory
+        bundle (its full-path source). We render it like a map archive - map_renderer already
+        draws trajectories.geojson - and preserve the known rooms if the bundle happens to
+        lack them. Best-effort: never break the working map.
+        """
+        try:
+            descriptor = await self.api.get_livemap_descriptor(self.robot_blid)
+        except Exception as err:
+            _LOGGER.debug("roomba_v4 livemap descriptor fetch failed: %s", err)
+            return
+        if not isinstance(descriptor, dict) or not descriptor:
+            return
+        candidates = self._deep_find_candidates(descriptor)
+        url = next((c["value"] for c in candidates if self._looks_like_downloadable_map_url(c["value"])), None)
+        if not url:
+            return
+        # Change key: prefer the descriptor's own version marker over the presigned URL,
+        # which changes signature on every fetch.
+        change_key = str(descriptor.get("timestamp") or descriptor.get("map_id") or descriptor.get("mapId") or urlparse(url).path)
+        if change_key == self._last_livemap_traj_key:
+            return
+        await self._write_debug_json("livemap_descriptor.json", descriptor)
+        prev_rooms, prev_room_info = list(self.rooms), list(self.room_info)
+        try:
+            await self.async_download_and_render_map(url)
+        except Exception as err:
+            _LOGGER.debug("roomba_v4 livemap trajectory render failed: %s", err)
+            return
+        if not self.rooms and prev_rooms:
+            self.rooms, self.room_info = prev_rooms, prev_room_info
+        self._last_livemap_traj_key = change_key
+        self.async_update_listeners()
 
     async def async_delete_cached_maps_and_fetch_latest(self) -> None:
         archive = Path(self.map_archive_path)

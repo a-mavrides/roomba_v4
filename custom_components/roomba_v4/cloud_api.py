@@ -452,6 +452,21 @@ class IRobotCloudApi:
             _LOGGER.warning("roomba_v4 AWS detailed client error: method=%s url=%s error=%s", method, url, err)
             raise CloudApiError(f"AWS request transport error for {url}: {err}") from err
 
+    async def get_livemap_descriptor(self, robot_id: str) -> dict[str, Any]:
+        """Return the raw /v1/p2maps/livemap response.
+
+        The app reads a LiveMapUpdate{mapId, url} from this - the presigned URL of the
+        current trajectory bundle (its live full-path source) - alongside mqtt_topic. We
+        return the whole dict so the caller can deep-search for that URL robustly.
+        """
+        if not robot_id:
+            return {}
+        url = f"{self.deployment['httpBaseAuth']}/v1/p2maps/livemap"
+        status, data, _txt = await self._aws_request_detailed(url, {"robotId": robot_id}, method="GET")
+        if status != 200 or not isinstance(data, dict):
+            return {}
+        return data
+
     async def get_livemap_mqtt_topic(self, robot_id: str) -> str | None:
         if not robot_id:
             return None
