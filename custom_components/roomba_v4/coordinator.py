@@ -2392,30 +2392,22 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         pmapv_id = (self.data.get("active_map_version") if isinstance(self.data, dict) else None) or ((((robot_state or {}).get("user_p2mapv_id") or (robot_state or {}).get("pmapv_id")) if isinstance(robot_state, dict) else None))
         feature_ctx = self._room_feature_context(room, region_candidates)
         region_id = str(region_candidates[0])
-        region_params = self._build_region_cleaning_params(region_id)
+        operating_mode = self._preferred_operating_mode_value()
+        region_params: dict[str, Any] = {}
+        if operating_mode is not None:
+            region_params["operatingMode"] = operating_mode
 
+        # Same fix as clean-all: send via the app_clean variant (the only one this robot
+        # accepts) with MINIMAL per-region params - operatingMode only. The old envelope
+        # variant plus suctionLevel/padWetness/top-level profile made room clean do nothing.
         commanddef: dict[str, Any] = {
             "robot_id": self.robot_blid,
             "command": "start",
-            "ordered": 1,
-            "params": self._build_top_level_cleaning_params(),
             "regions": [
-                {
-                    "region_id": region_id,
-                    "type": "rid",
-                    "params": region_params,
-                }
+                {"region_id": region_id, "type": "rid", "params": region_params}
             ],
-            "_preferred_payload_variant": "robot_command_envelope",
+            "_preferred_payload_variant": "app_clean",
         }
-        if p2map_id:
-            commanddef["p2map_id"] = p2map_id
-        if pmapv_id:
-            commanddef["user_p2mapv_id"] = pmapv_id
-        if variant_name:
-            commanddef["_room_single_variant"] = variant_name
-        if schema_name:
-            commanddef["_room_region_schema"] = schema_name
 
         await self._write_debug_json("routine_execute_clean_selected_room_context.json", {
             "selected_room": self.selected_room,
