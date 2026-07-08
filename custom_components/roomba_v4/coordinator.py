@@ -2403,12 +2403,17 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         commanddef: dict[str, Any] = {
             "robot_id": self.robot_blid,
             "command": "start",
+            "ordered": 1,
             "params": params,
             "regions": [
                 {"region_id": region_id, "type": "rid"}
             ],
             "_preferred_payload_variant": "app_clean",
         }
+        if p2map_id:
+            commanddef["p2map_id"] = p2map_id
+        if pmapv_id:
+            commanddef["user_p2mapv_id"] = pmapv_id
 
         await self._write_debug_json("routine_execute_clean_selected_room_context.json", {
             "selected_room": self.selected_room,

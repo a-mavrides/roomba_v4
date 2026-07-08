@@ -1645,6 +1645,14 @@ class IRobotCloudApi:
         }
         if isinstance(params, dict) and params:
             app_clean["params"] = params
+        # For a region clean the app also carries ordered + pmap id; without them the robot
+        # ignores the region restriction and cleans everything.
+        if commanddef.get("ordered") is not None:
+            app_clean["ordered"] = int(commanddef.get("ordered"))
+        if p2map_id:
+            app_clean["pmap_id"] = p2map_id
+        if pmapv_id:
+            app_clean["user_pmapv_id"] = pmapv_id
         if isinstance(regions, list) and regions:
             app_clean["regions"] = regions
         if "select_all" in commanddef:
