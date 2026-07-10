@@ -452,6 +452,21 @@ class IRobotCloudApi:
             _LOGGER.warning("roomba_v4 AWS detailed client error: method=%s url=%s error=%s", method, url, err)
             raise CloudApiError(f"AWS request transport error for {url}: {err}") from err
 
+    async def get_livemap_descriptor(self, robot_id: str) -> dict[str, Any]:
+        """Return the raw /v1/p2maps/livemap response.
+
+        The app reads a LiveMapUpdate{mapId, url} from this - the presigned URL of the
+        current trajectory bundle (its live full-path source) - alongside mqtt_topic. We
+        return the whole dict so the caller can deep-search for that URL robustly.
+        """
+        if not robot_id:
+            return {}
+        url = f"{self.deployment['httpBaseAuth']}/v1/p2maps/livemap"
+        status, data, _txt = await self._aws_request_detailed(url, {"robotId": robot_id}, method="GET")
+        if status != 200 or not isinstance(data, dict):
+            return {}
+        return data
+
     async def get_livemap_mqtt_topic(self, robot_id: str) -> str | None:
         if not robot_id:
             return None
@@ -1334,7 +1349,7 @@ class IRobotCloudApi:
 
     def _preferred_payload_order(self, commanddef: dict[str, Any]) -> list[str]:
         preferred = commanddef.get("_preferred_payload_variant")
-        base = ["raw_commanddef_payload", "robot_command_envelope", "commanddef_wrapped", "apk_commanddefs_upper", "apk_commanddefs_lower", "mission_shadow_desired"]
+        base = ["raw_commanddef_payload", "robot_command_envelope", "commanddef_wrapped", "apk_commanddefs_upper", "apk_commanddefs_lower", "mission_shadow_desired", "app_clean", "app_favorite", "app_region_clean"]
         if isinstance(preferred, str) and preferred in base:
             return [preferred] + [name for name in base if name != preferred]
         return base
@@ -1620,7 +1635,79 @@ class IRobotCloudApi:
         if "select_all" in commanddef:
             payload_obj["select_all"] = bool(commanddef.get("select_all"))
 
+        # Byte-for-byte minimal match of the app's clean command (decompiled favorite):
+        #   {command, initiator, time, params:{operatingMode,...}, select_all}
+        # No p2map_id/null, no wrapping, no invalid fields - the app sends exactly this.
+        app_clean: dict[str, Any] = {
+            "command": command_lower,
+            "initiator": "localApp",
+            "time": payload_obj["time"],
+        }
+        if isinstance(params, dict) and params:
+            app_clean["params"] = params
+        # For a region clean the app also carries ordered + pmap id; without them the robot
+        # ignores the region restriction and cleans everything.
+        if commanddef.get("ordered") is not None:
+            app_clean["ordered"] = int(commanddef.get("ordered"))
+        if p2map_id:
+            app_clean["pmap_id"] = p2map_id
+        if pmapv_id:
+            app_clean["user_pmapv_id"] = pmapv_id
+        if isinstance(regions, list) and regions:
+            app_clean["regions"] = regions
+        if commanddef.get("smart_clean_id"):
+            app_clean["smart_clean_id"] = commanddef.get("smart_clean_id")
+        if commanddef.get("smart_clean_modified") is not None:
+            app_clean["smart_clean_modified"] = int(commanddef.get("smart_clean_modified"))
+        if "select_all" in commanddef:
+            app_clean["select_all"] = bool(commanddef.get("select_all"))
+
+        # Ground truth from the robot's own lastCommand echo of an app (rmtApp) per-room clean:
+        #   {command:"start", initiator:"rmtApp", time, ordered:1,
+        #    p2map_id, params:{profile:"normal"},
+        #    regions:[{region_id, type:"rid", params:{operatingMode, suctionLevel, carpetBoost, twoPass, ...}}],
+        #    user_p2mapv_id}
+        # Flat (no commanddefs wrapper), NO select_all / smart_clean_id, and crucially the map
+        # ids are p2map_id / user_p2mapv_id (with the 2) - the misspelled pmap_id/user_pmapv_id
+        # is why the region restriction was ignored. Suction rides inline as suctionLevel.
+        app_region_clean: dict[str, Any] = {
+            "command": command_lower,
+            "initiator": "rmtApp",
+            "time": payload_obj["time"],
+            "ordered": int(commanddef.get("ordered")) if commanddef.get("ordered") is not None else 1,
+        }
+        if p2map_id:
+            app_region_clean["p2map_id"] = p2map_id
+        app_region_clean["params"] = params if isinstance(params, dict) and params else {"profile": "normal"}
+        if isinstance(regions, list) and regions:
+            app_region_clean["regions"] = regions
+        if pmapv_id:
+            app_region_clean["user_p2mapv_id"] = pmapv_id
+
+        # App serializes commands as a CommandListDef under `commanddefs` (APK/favorite shape):
+        #   {commanddefs:[{command,id,robot_id,pmap_id,ordered,regions:[{region_id,type,params}],smart_clean_id}]}
+        app_fav_routine: dict[str, Any] = {"command": command_lower, "id": "1", "robot_id": robot_id}
+        if p2map_id:
+            app_fav_routine["pmap_id"] = p2map_id
+        if commanddef.get("ordered") is not None:
+            app_fav_routine["ordered"] = int(commanddef.get("ordered"))
+        if isinstance(params, dict) and params:
+            app_fav_routine["params"] = params
+        if isinstance(regions, list) and regions:
+            app_fav_routine["regions"] = regions
+        if commanddef.get("smart_clean_id"):
+            app_fav_routine["smart_clean_id"] = commanddef.get("smart_clean_id")
+        if pmapv_id:
+            app_fav_routine["user_pmapv_id"] = pmapv_id
+        if commanddef.get("smart_clean_modified") is not None:
+            app_fav_routine["smart_clean_modified"] = int(commanddef.get("smart_clean_modified"))
+        if "select_all" in commanddef:
+            app_fav_routine["select_all"] = bool(commanddef.get("select_all"))
+
         variants: list[tuple[str, dict[str, Any]]] = [
+            ("app_region_clean", app_region_clean),
+            ("app_favorite", {"commanddefs": [app_fav_routine]}),
+            ("app_clean", app_clean),
             ("apk_commanddefs_upper", {"commanddefs": [routine_upper]}),
             ("apk_commanddefs_lower", {"commanddefs": [routine_lower]}),
             ("raw_commanddef_payload", payload_obj),
@@ -1762,13 +1849,12 @@ class IRobotCloudApi:
                 add("current.state.reported", current_state.get("reported"))
                 add("current.state.desired", current_state.get("desired"))
 
-        previous = payload.get("previous")
-        if isinstance(previous, dict):
-            prev_state = previous.get("state")
-            if isinstance(prev_state, dict):
-                add("previous.state", prev_state)
-                add("previous.state.reported", prev_state.get("reported"))
-                add("previous.state.desired", prev_state.get("desired"))
+        # NOTE: deliberately ignore payload["previous"]. In AWS IoT shadow
+        # update/documents messages the "previous" block is the state *before*
+        # the change (stale by definition). Because fragments are deep-merged in
+        # order, ingesting it would let an old cleanMissionStatus (e.g. phase=run
+        # from the last mission) clobber the current reported state and make a
+        # docked robot look like it's still cleaning.
 
         metadata = payload.get("metadata")
         if isinstance(metadata, dict):
@@ -1835,7 +1921,68 @@ class IRobotCloudApi:
 
         await asyncio.to_thread(_write)
 
+    async def _capture_app_last_command(self, topic: str | None, payload: Any) -> None:
+        """Capture the robot's echo of the last command it received (shadow `lastCommand`).
+
+        The robot reports the exact command payload it accepted under `lastCommand`. Running a
+        per-room clean from the official iRobot app makes this hold the real wire format the app
+        uses to restrict a clean to selected regions - the ground truth we need to replicate.
+        Debug-only: appended to app_last_command.json, never merged into live state.
+        """
+        found: dict[str, Any] | None = None
+
+        def visit(node: Any) -> None:
+            nonlocal found
+            if found is not None:
+                return
+            if isinstance(node, dict):
+                lc = node.get("lastCommand")
+                if isinstance(lc, dict) and lc.get("command"):
+                    found = lc
+                    return
+                # Some firmwares echo the command at top level (command + regions/select_all).
+                if node.get("command") and ("regions" in node or "select_all" in node or "pmap_id" in node):
+                    found = node
+                    return
+                for value in node.values():
+                    visit(value)
+            elif isinstance(node, list):
+                for item in node:
+                    visit(item)
+
+        try:
+            visit(payload)
+        except Exception:
+            return
+        if not found:
+            return
+        key = json.dumps(found, sort_keys=True, default=str)
+        if key == getattr(self, "_last_app_command_key", None):
+            return
+        self._last_app_command_key = key
+        history_path = self._event_debug_path("app_last_command.json")
+        if not history_path:
+            return
+
+        def _append() -> None:
+            items: list[Any] = []
+            if history_path.exists():
+                try:
+                    items.extend(json.loads(history_path.read_text(encoding="utf-8")))
+                except Exception:
+                    items = []
+            items.append({
+                "ts": datetime.now(tz=UTC).isoformat(),
+                "topic": topic,
+                "last_command": found,
+            })
+            items = items[-30:]
+            history_path.write_text(json.dumps(items, indent=2, default=str), encoding="utf-8")
+
+        await asyncio.to_thread(_append)
+
     async def _ingest_live_state_payload(self, topic: str | None, payload: Any) -> None:
+        await self._capture_app_last_command(topic, payload)
         mode = self._topic_merge_mode(topic)
         source_kind = self._topic_source_kind(topic)
         if mode == "software":
@@ -2044,12 +2191,17 @@ class IRobotCloudApi:
             except asyncio.TimeoutError:
                 continue
             packets.append(packet)
+            # Log the real packet payload. Do NOT wrap it with the debug capture phase:
+            # _append_event_packet ingests payload_json into live state, and the livemap
+            # fragment extractor treats any top-level "phase" key as cleanMissionStatus.phase,
+            # which would poison the mission phase with the debug label (e.g. "post_subscribe_warmup").
             await self._append_event_packet({
                 "ts": datetime.now(tz=UTC).isoformat(),
                 "type": "message" if packet.get("type") == 3 else f"packet_{packet.get('type')}",
                 "topic": packet.get("topic"),
-                "payload_json": {"phase": phase, **packet},
+                "payload_json": packet.get("payload_json"),
                 "payload_text": packet.get("payload_text"),
+                "capture_phase": phase,
             })
             self._merge_live_state_from_packet(packet)
         return packets
@@ -3161,6 +3313,35 @@ class IRobotCloudApi:
             "topic": topic,
             "payload_variant": variant_name,
         }
+
+    async def async_request_state_refresh(self, robot_id: str) -> bool:
+        """Publish shadow 'get' requests to actively pull current state, like opening the app.
+
+        Docked/idle robots stop pushing shadow updates, so the passive snapshot goes
+        stale. This pokes the robot's named shadows; the responses arrive on the main
+        subscriber read loop and update live state through the normal listener path, so
+        we only publish here (no capture) to avoid racing the subscriber's own reads.
+        Returns True if the get requests were sent.
+        """
+        ws = self._subscriber_ws
+        if ws is None or getattr(ws, "closed", False) or self._subscriber_stop.is_set():
+            return False
+        refresh_topics = [
+            topic for topic in self._cloud_get_topics(robot_id)
+            if "/shadow/name/ro-currentstate/get" in topic or "/shadow/name/ro-stats/get" in topic
+        ]
+        for topic in refresh_topics:
+            publish_packet = self._mqtt_publish_packet(topic, b"{}")
+            try:
+                async with self._subscriber_send_lock:
+                    if self._subscriber_ws is None or getattr(self._subscriber_ws, "closed", False):
+                        return False
+                    await self._subscriber_ws.send(publish_packet)
+            except Exception as err:
+                _LOGGER.debug("roomba_v4 state refresh publish failed robot_id=%s: %s", robot_id, err)
+                return False
+            await asyncio.sleep(0.1)
+        return True
 
     async def _send_post_command_shadow_refresh(self, robot_id: str) -> None:
         """Best-effort delayed refresh after commands.

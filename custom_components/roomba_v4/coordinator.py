@@ -58,6 +58,18 @@ DIRECT_URL_KEYS = (
     "uri",
 )
 
+# This model periodically emits brief phantom run->dock->charge bursts while parked on
+# the dock (battery stays full, sqft stays 0, position never leaves the dock). We only
+# believe a spontaneous switch away from "docked" once the active state persists past the
+# phantom duration OR the robot actually drives away from the dock. A user/schedule start
+# is trusted immediately via COMMAND_TRUST_WINDOW so the on-dock recalibration phase
+# (where no fresh position is reported yet) isn't mistaken for a phantom.
+PHANTOM_ACTIVE_HOLD = timedelta(seconds=90)
+DOCK_ESCAPE_DISTANCE = 0.75
+COMMAND_TRUST_WINDOW = timedelta(seconds=150)
+# Only these states exhibit the phantom flicker; error/paused/idle must never be held back.
+DEBOUNCED_STATES = {"cleaning", "returning"}
+
 
 class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
     def __init__(
@@ -86,6 +98,8 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         self.rooms: list[str] = []
         self.map_render_metadata: dict[str, Any] = {}
         self.selected_room: str | None = None
+        self.selected_map_id: str | None = None
+        self.active_state_refresh: bool = True
         self.store = Store(hass, STORAGE_VERSION, f"{STORAGE_KEY_PREFIX}.{entry_id}")
         self._restored = False
         self._restored_data: dict[str, Any] = {}
@@ -96,6 +110,11 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         self._last_livemap_message_at: datetime | None = None
         self._last_good_pose: dict[str, Any] | None = None
         self._last_path_pose: dict[str, Any] | None = None
+        self._docked_anchor: dict[str, float] | None = None
+        self._active_since: datetime | None = None
+        self._last_mission_command_at: datetime | None = None
+        self._last_livemap_traj_key: str | None = None
+        self._last_mission_id: str | None = None
         self.api.add_live_state_listener(self._handle_live_state_update)
         self._last_event_signature: str | None = None
         self._last_event_at: datetime | None = None
@@ -181,6 +200,20 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
             self.data["preferred_water_level"] = option
         await self.store.async_save(base)
         self.async_update_listeners()
+
+    def _region_smart_clean(self, region_id: str) -> tuple[str | None, dict[str, Any]]:
+        """Return (smart_clean_id, existing smart_clean_prefs) for a region from clean_score."""
+        clean_score = (self.data or self._restored_data or {}).get("clean_score") or {}
+        clean_scores = clean_score.get("clean_scores") if isinstance(clean_score, dict) else None
+        for item in clean_scores or []:
+            if not isinstance(item, dict):
+                continue
+            sc_id = item.get("smart_clean_id")
+            for region in item.get("regions") or []:
+                if isinstance(region, dict) and str(region.get("region_id")) == str(region_id):
+                    prefs = region.get("smart_clean_prefs")
+                    return sc_id, (prefs if isinstance(prefs, dict) else {})
+        return None, {}
 
     def current_operating_mode_value(self) -> int | None:
         live_state = (self.data or self._restored_data or {}).get("live_state") or {}
@@ -414,7 +447,16 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         phase = str(cms.get("phase") or "").lower()
         cycle = str(cms.get("cycle") or "").lower()
         dock = live_state.get("dock") if isinstance(live_state.get("dock"), dict) else {}
-        if phase in {"charge", "chargecompleted", "recharge", "hmusrdock", "dockend", "dock"}:
+        # An actively running or returning mission is never "docked", even when a
+        # stale dock.contact/known flag lingers in the sticky-merged shadow state.
+        # Without this guard, a leftover dock flag makes a running robot report
+        # "docked" on every message that doesn't also carry a fresh dock update.
+        # hm* phases are homing/returning-to-dock (iRobot: hmUsrDock=user-requested dock,
+        # hmMidMsn=mid-mission recharge, hmPostMsn=post-mission). The capture confirms
+        # hmUsrDock reports cycle="dock" while still en route - that is "returning", NOT docked.
+        if phase in {"run", "resume", "new", "explore", "evac", "hmusr", "hmusrdock", "hmmidmssn", "hmpostmsn", "return", "returning", "homing", "dockroute", "dockroutecomplete"}:
+            return False
+        if phase in {"charge", "chargecompleted", "recharge", "dockend", "dock"}:
             return True
         if dock.get("contact") is True:
             return True
@@ -432,7 +474,7 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         dock = live_state.get("dock") if isinstance(live_state.get("dock"), dict) else {}
         if self._is_definitely_docked(live_state):
             return "docked"
-        if phase in {"run", "resume", "new", "explore", "evac", "hmusr", "hmusrdock"}:
+        if phase in {"run", "resume", "new", "explore", "evac", "hmusr"}:
             return "cleaning"
         if phase in {"pause", "paused"}:
             return "paused"
@@ -440,7 +482,7 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
             if cycle == "clean":
                 return "idle"
             return "idle"
-        if phase in {"hmmidmssn", "return", "returning", "homing", "dockroute", "dockroutecomplete"}:
+        if phase in {"hmusrdock", "hmmidmssn", "hmpostmsn", "return", "returning", "homing", "dockroute", "dockroutecomplete"}:
             return "returning"
         if phase in {"stuck", "cancelled", "error"}:
             return "error"
@@ -461,17 +503,22 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
             return f"Roomba needs attention (error {error})"
         if not_ready not in (None, 0, "0"):
             return f"Roomba is not ready ({not_ready})"
-        if phase in {"run", "resume", "new", "explore", "evac", "hmusr"}:
+        # The app treats these dock activities as distinct states, not "cleaning".
+        if "evac" in phase:
+            return "Roomba is emptying the bin"
+        if "dry" in phase:
+            return "Roomba is drying the mop pad"
+        if phase in {"run", "resume", "new", "explore", "hmusr"}:
             return "Roomba is cleaning"
         if phase in {"pause", "paused"}:
             return "Roomba is paused"
-        if phase in {"hmmidmssn", "return", "returning", "homing", "dockroute", "dockroutecomplete", "dock"}:
+        if phase in {"hmusrdock", "hmmidmssn", "hmpostmsn", "return", "returning", "homing", "dockroute", "dockroutecomplete"}:
             return "Roomba is returning to the dock"
         if phase == "stop":
             if cycle == "clean":
                 return "Roomba is ready to clean"
             return "Roomba is idle"
-        if phase in {"charge", "chargecompleted", "recharge", "hmusrdock", "dockend"} and cycle in {"none", "idle", ""}:
+        if phase in {"charge", "chargecompleted", "recharge", "dockend"} and cycle in {"none", "idle", ""}:
             if bin_present is False:
                 return "Roomba is docked, but the bin is missing"
             mop_ready = bool(tank_present) and detected_pad not in {"", "nopad", "none", "unknown", "false", "0"}
@@ -492,14 +539,20 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         dock_known = bool(status.get("dock_known"))
         dock_contact = bool(status.get("dock_contact"))
 
-        idle_like_phase = {"stop", "idle", "ready", "startup_shadow_refresh", "charge", "chargecompleted", "dock", "dockend", "recharge", "hmusrdock", ""}
+        idle_like_phase = {"stop", "idle", "ready", "startup_shadow_refresh", "charge", "chargecompleted", "dock", "dockend", "recharge", ""}
         idle_like_cycle = {"none", "idle", ""}
-        docking_like_phase = {"charge", "chargecompleted", "dock", "dockend", "recharge", "hmusrdock"}
+        docking_like_phase = {"charge", "chargecompleted", "dock", "dockend", "recharge"}
+        returning_like_phase = {"hmusrdock", "hmmidmssn", "hmpostmsn", "return", "returning", "homing", "dockroute", "dockroutecomplete"}
         idle_like_message = any(token in message for token in {"idle", "ready"})
         docked_like_message = any(token in message for token in {"docked", "charging", "at the dock", "at dock", "home"})
 
         if self._is_definitely_docked(live_state):
             return "docked"
+
+        # Homing phases are unambiguously "returning" - decide before the idle/dock heuristics
+        # so a lingering dock flag can't mislabel a robot that is on its way back.
+        if phase in returning_like_phase:
+            return "returning"
 
         # On this model the explicit dock flags are often absent after a successful
         # return. When mission cycle has already collapsed to none/idle and the
@@ -526,6 +579,83 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         if "error" in message or "attention" in message:
             return "error"
         return state
+
+    def _debounce_vacuum_state(self, raw_state: str, status: dict[str, Any]) -> str:
+        """Filter the robot's brief phantom run/dock bursts while it's parked on the dock.
+
+        Only the active-mission states flicker as phantoms, so error/paused/idle always
+        pass straight through. A spontaneous switch to cleaning/returning is believed only
+        once a start/return command was recently issued, OR the robot moved away from the
+        dock, OR the active state persisted past the phantom duration. When a phantom is
+        suppressed the status message is snapped to docked so the sensors stay consistent
+        with the vacuum state. Mutates ``status`` in that case.
+        """
+        now = datetime.now(tz=UTC)
+        x = status.get("x")
+        y = status.get("y")
+        has_pos = isinstance(x, (int, float)) and isinstance(y, (int, float))
+
+        if raw_state == "docked":
+            self._active_since = None
+            if has_pos:
+                self._docked_anchor = {"x": float(x), "y": float(y)}
+            return "docked"
+
+        # Never hold back error/paused/idle/etc; the phantom only affects mission states.
+        if raw_state not in DEBOUNCED_STATES:
+            return raw_state
+
+        # The phantom is specifically a brief "run" burst while parked; "returning" is never a
+        # phantom, so never hold it back (doing so mislabelled homing robots as docked).
+        if raw_state == "returning":
+            self._active_since = None
+            return raw_state
+
+        # A genuine mission runs a real clean cycle and accumulates area; a phantom burst on
+        # the dock does neither (cycle stays none/charge, sqft stays 0). Trust a real mission
+        # immediately - this is what an app-initiated clean looks like (no command from us,
+        # robot already away from the dock). Without this, app-started cleans get suppressed
+        # to "docked" for their whole run, which also starved the live path of trajectory
+        # refreshes. Note: this robot never reports mssnM, so key off cycle/sqft.
+        cycle = str(status.get("mission_cycle") or "").lower()
+        sqft = status.get("mission_sqft")
+        real_cycle = cycle in {"clean", "spot", "quick", "train"}
+        real_area = isinstance(sqft, (int, float)) and sqft > 0
+        if real_cycle or real_area:
+            self._active_since = None
+            self._docked_anchor = None
+            return raw_state
+
+        # Trust a recently commanded start/return. Covers the on-dock recalibration phase
+        # where no fresh position is reported yet (phantom bursts carry no command).
+        if self._last_mission_command_at is not None and (now - self._last_mission_command_at) < COMMAND_TRUST_WINDOW:
+            self._active_since = None
+            self._docked_anchor = None
+            return raw_state
+
+        # No recent dock anchor: nothing to debounce against, trust the raw state.
+        if self._docked_anchor is None:
+            return raw_state
+
+        # Actually drove away from the dock -> real mission, accept immediately.
+        if has_pos:
+            dx = float(x) - self._docked_anchor["x"]
+            dy = float(y) - self._docked_anchor["y"]
+            if (dx * dx + dy * dy) ** 0.5 > DOCK_ESCAPE_DISTANCE:
+                self._active_since = None
+                self._docked_anchor = None
+                return raw_state
+
+        # Still at the dock with no command: only believe it once it has persisted.
+        if self._active_since is None:
+            self._active_since = now
+        elif (now - self._active_since) >= PHANTOM_ACTIVE_HOLD:
+            self._active_since = None
+            self._docked_anchor = None
+            return raw_state
+
+        status["status_message"] = "Roomba is docked"
+        return "docked"
 
     def _build_live_status_block(self, live_state: dict[str, Any], previous_status: dict[str, Any] | None = None) -> dict[str, Any]:
         cms = live_state.get("cleanMissionStatus") if isinstance(live_state.get("cleanMissionStatus"), dict) else {}
@@ -650,6 +780,8 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         preserve_seconds: int = 8,
     ) -> None:
         now = datetime.now(tz=UTC)
+        if command_name in {"clean_all", "resume", "dock"}:
+            self._last_mission_command_at = now
         base = dict(self.data or self._restored_data or {})
         status = dict(base.get("status") or {})
         if mission_phase is not None:
@@ -926,6 +1058,7 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         else:
             status = self._build_live_status_block(live_state, base.get("status") or {})
             vacuum_state = self._normalize_vacuum_state_from_status(live_state, status)
+            vacuum_state = self._debounce_vacuum_state(vacuum_state, status)
             status["vacuum_state"] = vacuum_state
             base["status"] = status
             base["vacuum_state"] = vacuum_state
@@ -1006,6 +1139,16 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
             if self.debug_enabled:
                 self.legacy_debug_dir.mkdir(parents=True, exist_ok=True)
             await self.async_start_background_subscriber()
+
+            # Docked/idle robots stop pushing shadow updates, so the passive MQTT snapshot
+            # goes stale until something (e.g. opening the app) wakes them. When enabled,
+            # actively pull current state each poll; the response updates state via the
+            # subscriber's listener path shortly after.
+            if self.active_state_refresh:
+                try:
+                    await self.api.async_request_state_refresh(self.robot_blid)
+                except Exception as err:
+                    _LOGGER.debug("roomba_v4 debug: active state refresh failed: %s", err)
 
             pmaps: Any = []
             try:
@@ -1111,9 +1254,47 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
             await self._write_debug_json("resolved_room_info.json", self.room_info)
 
             live_state = self.api.get_live_state_snapshot()
+            # Carry the accumulated path trail across the poll rebuild. The API snapshot is
+            # composed from source fragments and never contains cumulative_path_points (those
+            # are built in _handle_live_state_update), so without this the trail is wiped on
+            # every poll - which becomes very visible once the state is correctly "cleaning"
+            # and the poll interval drops to 20s.
+            prev_live_state = (self.data or self._restored_data or {}).get("live_state")
+            prev_livemap = prev_live_state.get("livemap") if isinstance(prev_live_state, dict) else None
+            # Detect a fresh mission (new missionId / nMssn) so we don't paint a new run over
+            # the previous run's trail. This matters most for app-initiated cleans, where we
+            # never call async_clear_path_trail ourselves.
+            cur_cms = live_state.get("cleanMissionStatus") if isinstance(live_state.get("cleanMissionStatus"), dict) else {}
+            mission_key = str(cur_cms.get("missionId") or cur_cms.get("nMssn") or "")
+            new_mission = bool(mission_key) and mission_key != self._last_mission_id
+            if mission_key:
+                self._last_mission_id = mission_key
+            if new_mission:
+                cur_livemap = live_state.get("livemap") if isinstance(live_state.get("livemap"), dict) else {}
+                if isinstance(cur_livemap, dict):
+                    cur_livemap["cumulative_path_points"] = []
+                    cur_livemap["cumulative_path_points_count"] = 0
+                    live_state["livemap"] = cur_livemap
+                self._last_livemap_traj_key = None
+            elif isinstance(prev_livemap, dict) and prev_livemap.get("cumulative_path_points"):
+                cur_livemap = live_state.get("livemap") if isinstance(live_state.get("livemap"), dict) else {}
+                if not isinstance(cur_livemap, dict):
+                    cur_livemap = {}
+                cur_livemap["cumulative_path_points"] = prev_livemap.get("cumulative_path_points")
+                cur_livemap["cumulative_path_points_count"] = prev_livemap.get("cumulative_path_points_count")
+                live_state["livemap"] = cur_livemap
             status_block = self._build_live_status_block(live_state)
             vacuum_state = self._normalize_vacuum_state_from_status(live_state, status_block)
+            vacuum_state = self._debounce_vacuum_state(vacuum_state, status_block)
             status_block["vacuum_state"] = vacuum_state
+
+            # During an active mission, pull the current trajectory bundle like the app does
+            # (full live path) rather than relying only on sparse MQTT poses.
+            if vacuum_state in {"cleaning", "returning"}:
+                try:
+                    await self.async_refresh_livemap_trajectory()
+                except Exception as err:
+                    _LOGGER.debug("roomba_v4 debug: livemap trajectory refresh failed: %s", err)
             await self._write_debug_json("live_state_snapshot.json", live_state)
             await self._write_debug_json("live_status_block.json", status_block)
 
@@ -1153,6 +1334,8 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
                 "room_info": self.room_info,
             "map_render_metadata": self.map_render_metadata,
                 "selected_room": self.selected_room,
+                "selected_map_id": self.selected_map_id,
+                "active_state_refresh": self.active_state_refresh,
                 "preferred_cleaning_mode": self.preferred_cleaning_mode(),
                 "preferred_suction_level": self.preferred_suction_level(),
                 "preferred_water_level": self.preferred_water_level(),
@@ -1189,6 +1372,8 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         self.rooms = room_names_from_info(self.room_info) or list(self._restored_data.get("rooms") or [])
         self.map_render_metadata = dict(self._restored_data.get("map_render_metadata") or {})
         self.selected_room = self._restored_data.get("selected_room")
+        self.selected_map_id = self._restored_data.get("selected_map_id")
+        self.active_state_refresh = bool(self._restored_data.get("active_state_refresh", True))
         if self.supports_mopping() and not self._restored_data.get("preferred_cleaning_mode"):
             self._restored_data["preferred_cleaning_mode"] = self.derived_cleaning_mode()
         stored_url = self._restored_data.get("s3_map_url")
@@ -1210,6 +1395,10 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
                 yield node_path, node
 
     def _select_active_map(self, robot: dict[str, Any], pmaps: Any, mission_history: Any) -> dict[str, Any] | None:
+        if self.selected_map_id and isinstance(pmaps, list):
+            for pmap in pmaps:
+                if isinstance(pmap, dict) and self._pmap_matches_map_id(pmap, self.selected_map_id):
+                    return pmap
         if isinstance(pmaps, list):
             for pmap in pmaps:
                 if isinstance(pmap, dict) and (
@@ -1284,6 +1473,95 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
                     if value not in (None, ""):
                         return str(value)
         return None
+
+    def _pmap_id_value(self, pmap: dict[str, Any]) -> str | None:
+        return self._first_value(pmap, keys=MAP_ID_KEYS)
+
+    def _pmap_matches_map_id(self, pmap: dict[str, Any], map_id: str) -> bool:
+        for key in MAP_ID_KEYS:
+            value = pmap.get(key)
+            if value not in (None, "") and str(value) == str(map_id):
+                return True
+        return False
+
+    def _pmaps_list(self) -> list[dict[str, Any]]:
+        pmaps = (self.data or self._restored_data or {}).get("pmaps")
+        return [pmap for pmap in pmaps if isinstance(pmap, dict)] if isinstance(pmaps, list) else []
+
+    def _map_display_name(self, pmap: dict[str, Any], index: int) -> str:
+        name = pmap.get("name")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+        map_id = self._pmap_id_value(pmap)
+        return f"Map {index + 1} ({map_id[:8]})" if map_id else f"Map {index + 1}"
+
+    def _find_pmap_by_id(self, pmaps: list[dict[str, Any]], map_id: str) -> dict[str, Any] | None:
+        return next((pmap for pmap in pmaps if self._pmap_matches_map_id(pmap, map_id)), None)
+
+    def map_options(self) -> list[str]:
+        return [self._map_display_name(pmap, idx) for idx, pmap in enumerate(self._pmaps_list())]
+
+    @property
+    def selected_map(self) -> str | None:
+        pmaps = self._pmaps_list()
+        if not pmaps:
+            return None
+        active_map = (self.data or self._restored_data or {}).get("active_map")
+        active_map_id = self._pmap_id_value(active_map) if isinstance(active_map, dict) else None
+        target_id = self.selected_map_id or active_map_id
+        pmap = (self._find_pmap_by_id(pmaps, target_id) if target_id else None) or pmaps[0]
+        return self._map_display_name(pmap, pmaps.index(pmap))
+
+    async def async_select_map(self, option: str) -> None:
+        pmaps = self._pmaps_list()
+        match = next((pmap for idx, pmap in enumerate(pmaps) if self._map_display_name(pmap, idx) == option), None)
+        if match is None:
+            raise CloudApiError(f"Unknown map/floor selection: {option}")
+        map_id = self._pmap_id_value(match)
+        self.selected_map_id = map_id
+        if self._restored_data is None:
+            self._restored_data = {}
+        self._restored_data["selected_map_id"] = map_id
+        await self._write_debug_json("selected_map.json", {"selected_map_id": map_id, "option": option})
+        # Drop the previous floor's trail so it isn't drawn on the newly selected map.
+        await self.async_clear_path_trail()
+        self.async_update_listeners()
+        await self.async_request_refresh()
+
+    async def async_set_active_state_refresh(self, enabled: bool) -> None:
+        """Enable/disable actively pulling live state on each poll cycle."""
+        self.active_state_refresh = bool(enabled)
+        base = dict(self.data or self._restored_data or {})
+        base["active_state_refresh"] = self.active_state_refresh
+        self._restored_data = base
+        if isinstance(self.data, dict):
+            self.data["active_state_refresh"] = self.active_state_refresh
+        await self.store.async_save(base)
+        if self.active_state_refresh:
+            try:
+                await self.api.async_request_state_refresh(self.robot_blid)
+            except Exception as err:
+                _LOGGER.debug("roomba_v4 debug: active state refresh (on enable) failed: %s", err)
+        self.async_update_listeners()
+
+    async def async_clear_path_trail(self) -> None:
+        """Reset the accumulated path trail across coordinator state and the camera."""
+        self._last_path_pose = None
+        for store in (self.data, self._restored_data):
+            if not isinstance(store, dict):
+                continue
+            live_state = store.get("live_state")
+            livemap = live_state.get("livemap") if isinstance(live_state, dict) else None
+            if isinstance(livemap, dict):
+                livemap["cumulative_path_points"] = []
+                livemap["cumulative_path_points_count"] = 0
+                livemap["path_points"] = []
+        camera = getattr(self, "map_camera", None)
+        if camera is not None:
+            await camera.async_clear_path_history()
+        if isinstance(self.data, dict):
+            await self.store.async_save(self.data)
+        self.async_update_listeners()
 
     def _resolve_active_map_id(self, robot: dict[str, Any], active_map: dict[str, Any] | None, mission_map: dict[str, Any] | None) -> str | None:
         current = self._first_value(active_map, robot, mission_map, keys=MAP_ID_KEYS)
@@ -1584,6 +1862,42 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         self.async_update_listeners()
 
 
+    async def async_refresh_livemap_trajectory(self) -> None:
+        """Render the current livemap trajectory bundle, the way the app draws the live path.
+
+        The /v1/p2maps/livemap response carries a presigned URL to the current trajectory
+        bundle (its full-path source). We render it like a map archive - map_renderer already
+        draws trajectories.geojson - and preserve the known rooms if the bundle happens to
+        lack them. Best-effort: never break the working map.
+        """
+        try:
+            descriptor = await self.api.get_livemap_descriptor(self.robot_blid)
+        except Exception as err:
+            _LOGGER.debug("roomba_v4 livemap descriptor fetch failed: %s", err)
+            return
+        if not isinstance(descriptor, dict) or not descriptor:
+            return
+        candidates = self._deep_find_candidates(descriptor)
+        url = next((c["value"] for c in candidates if self._looks_like_downloadable_map_url(c["value"])), None)
+        if not url:
+            return
+        # Change key: prefer the descriptor's own version marker over the presigned URL,
+        # which changes signature on every fetch.
+        change_key = str(descriptor.get("timestamp") or descriptor.get("map_id") or descriptor.get("mapId") or urlparse(url).path)
+        if change_key == self._last_livemap_traj_key:
+            return
+        await self._write_debug_json("livemap_descriptor.json", descriptor)
+        prev_rooms, prev_room_info = list(self.rooms), list(self.room_info)
+        try:
+            await self.async_download_and_render_map(url)
+        except Exception as err:
+            _LOGGER.debug("roomba_v4 livemap trajectory render failed: %s", err)
+            return
+        if not self.rooms and prev_rooms:
+            self.rooms, self.room_info = prev_rooms, prev_room_info
+        self._last_livemap_traj_key = change_key
+        self.async_update_listeners()
+
     async def async_delete_cached_maps_and_fetch_latest(self) -> None:
         archive = Path(self.map_archive_path)
         await self.hass.async_add_executor_job(self._delete_cached_map_files, archive)
@@ -1834,6 +2148,9 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
             "resolved": resolved,
             "commanddef": commanddef,
         })
+        # Start each run with a fresh trail so the new mission isn't drawn over the previous one.
+        await self.async_clear_path_trail()
+        self._last_mission_command_at = datetime.now(tz=UTC)
         result = await self.api.publish_commanddef_via_cloud_mqtt(commanddef)
         await self._write_debug_json("send_command_app_segment_clean_result.json", result)
         if self.data is not None:
@@ -1928,9 +2245,12 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         return {}
 
     def _build_region_cleaning_params(self, region_id: str | None = None) -> dict[str, Any]:
+        # Match the app's per-region params shape (decompiled favorites_json_data.json):
+        #   {scrub, padWetness:{disposable,reusable}, twoPass, noAutoPasses, operatingMode}
         params = self._default_region_params_from_clean_score(region_id)
-        if "twoPass" not in params:
-            params["twoPass"] = False
+        params.setdefault("scrub", 0)
+        params.setdefault("twoPass", False)
+        params.setdefault("noAutoPasses", True)
 
         operating_mode = self._preferred_operating_mode_value()
         if operating_mode is not None:
@@ -1943,12 +2263,18 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         if suction_level is not None:
             params["suctionLevel"] = suction_level
 
+        prev_wetness = params.get("padWetness") if isinstance(params.get("padWetness"), dict) else {}
+        prev_level = prev_wetness.get("disposable")
+        if prev_level is None:
+            prev_level = prev_wetness.get("reusable")
+        if prev_level is None:
+            prev_level = prev_wetness.get("padPlate")
         water_level = self._normalize_water_level_value(
             self.preferred_water_level(),
-            fallback=(int((params.get("padWetness") or {}).get("padPlate")) if isinstance(params.get("padWetness"), dict) and (params.get("padWetness") or {}).get("padPlate") is not None else None),
+            fallback=(int(prev_level) if prev_level is not None else None),
         )
         if self.supports_mopping() and operating_mode in {1, 3, 6} and water_level is not None:
-            params["padWetness"] = {"padPlate": water_level}
+            params["padWetness"] = {"disposable": water_level, "reusable": water_level}
         elif operating_mode == 2:
             params.pop("padWetness", None)
 
@@ -2098,30 +2424,46 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         pmapv_id = (self.data.get("active_map_version") if isinstance(self.data, dict) else None) or ((((robot_state or {}).get("user_p2mapv_id") or (robot_state or {}).get("pmapv_id")) if isinstance(robot_state, dict) else None))
         feature_ctx = self._room_feature_context(room, region_candidates)
         region_id = str(region_candidates[0])
-        region_params = self._build_region_cleaning_params(region_id)
-
+        # Ground truth: the robot's own lastCommand echo of an app per-room clean is a FLAT command
+        #   {command:"start", initiator:"rmtApp", time, ordered:1, p2map_id, params:{profile},
+        #    regions:[{region_id, type:"rid", params:{operatingMode, suctionLevel, carpetBoost,
+        #    twoPass, (padWetness for mop)}}], user_p2mapv_id}
+        # The map ids are p2map_id / user_p2mapv_id (with the 2) and BOTH are required - that (not
+        # the wrapper or smart_clean_id) is what restricts the clean to the region. Region params
+        # carry the user's live choices (mode/suction), falling back to the region's saved prefs.
+        _smart_clean_id, existing = self._region_smart_clean(region_id)
+        existing = existing if isinstance(existing, dict) else {}
+        operating_mode = self._preferred_operating_mode_value() or existing.get("operatingMode")
+        suction = self._normalize_suction_level_value(
+            self.preferred_suction_level(), fallback=existing.get("suctionLevel")
+        )
+        region_params: dict[str, Any] = {"twoPass": bool(existing.get("twoPass", False))}
+        if operating_mode is not None:
+            region_params["operatingMode"] = operating_mode
+        if suction is not None:
+            region_params["suctionLevel"] = suction
+        region_params["carpetBoost"] = bool(existing.get("carpetBoost", False))
+        if operating_mode in {1, 3, 6} and self.supports_mopping():
+            saved_pad = existing.get("padWetness") if isinstance(existing.get("padWetness"), dict) else {}
+            water = self._normalize_water_level_value(
+                self.preferred_water_level(), fallback=saved_pad.get("padPlate")
+            )
+            if water is not None:
+                region_params["padWetness"] = {"padPlate": water}
         commanddef: dict[str, Any] = {
             "robot_id": self.robot_blid,
             "command": "start",
             "ordered": 1,
-            "params": self._build_top_level_cleaning_params(),
+            "params": {"profile": self._profile_name_for_command()},
             "regions": [
-                {
-                    "region_id": region_id,
-                    "type": "rid",
-                    "params": region_params,
-                }
+                {"region_id": region_id, "type": "rid", "params": region_params}
             ],
-            "_preferred_payload_variant": "robot_command_envelope",
+            "_preferred_payload_variant": "app_region_clean",
         }
         if p2map_id:
             commanddef["p2map_id"] = p2map_id
         if pmapv_id:
             commanddef["user_p2mapv_id"] = pmapv_id
-        if variant_name:
-            commanddef["_room_single_variant"] = variant_name
-        if schema_name:
-            commanddef["_room_region_schema"] = schema_name
 
         await self._write_debug_json("routine_execute_clean_selected_room_context.json", {
             "selected_room": self.selected_room,
@@ -2138,6 +2480,9 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
             },
             "commanddef": commanddef,
         })
+        # Start each run with a fresh trail so the new mission isn't drawn over the previous one.
+        await self.async_clear_path_trail()
+        self._last_mission_command_at = datetime.now(tz=UTC)
         result = await self.api.publish_commanddef_via_cloud_mqtt(commanddef)
         await self._write_debug_json("routine_execute_clean_selected_room_result.json", result)
         if self.data is not None:
@@ -2146,31 +2491,22 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         return result
 
     def _build_clean_all_commanddef(self) -> dict[str, Any]:
-        robot_state = self.data.get("robot") if isinstance(self.data, dict) else None
-        p2map_id = (self.data.get("active_map_id") if isinstance(self.data, dict) else None) or ((robot_state or {}).get("p2map_id") if isinstance(robot_state, dict) else None)
-        pmapv_id = (self.data.get("active_map_version") if isinstance(self.data, dict) else None) or ((((robot_state or {}).get("user_p2mapv_id") or (robot_state or {}).get("pmapv_id")) if isinstance(robot_state, dict) else None))
-        params = self._build_top_level_cleaning_params()
+        # Match the app's clean-everything favorite byte-for-byte:
+        #   {command:"start", params:{operatingMode:6}, select_all:true}
+        # operatingMode ONLY. Adding padWetness made the mop command get rejected (it started
+        # nothing, while vacuum-only started fine) - the app's select_all command carries no
+        # padWetness; wetness comes from the saved config. Suction is a separate preference.
+        params: dict[str, Any] = {}
         operating_mode = self._preferred_operating_mode_value()
         if operating_mode is not None:
             params["operatingMode"] = operating_mode
-        suction_level = self._normalize_suction_level_value(self.preferred_suction_level())
-        if suction_level is not None:
-            params["suctionLevel"] = suction_level
-        water_level = self._normalize_water_level_value(self.preferred_water_level())
-        if self.supports_mopping() and operating_mode in {1, 3, 6} and water_level is not None:
-            params["padWetness"] = {"padPlate": water_level}
-        params["routine_type"] = "CLEAN_ALL"
-        commanddef: dict[str, Any] = {
+        return {
             "robot_id": self.robot_blid,
             "command": "start",
             "params": params,
-            "_preferred_payload_variant": "commanddef_wrapped",
+            "select_all": True,
+            "_preferred_payload_variant": "app_clean",
         }
-        if p2map_id:
-            commanddef["p2map_id"] = p2map_id
-        if pmapv_id:
-            commanddef["user_p2mapv_id"] = pmapv_id
-        return commanddef
 
     async def async_start_clean_all(self) -> dict[str, Any]:
         result = await self.async_execute_named_routine("clean_all")
@@ -2214,6 +2550,9 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
             raise CloudApiError(f"No command definition found for routine {routine_key}")
 
         await self._write_debug_json(f"routine_execute_{debug_prefix}_commanddef.json", commanddef)
+        # Start each run with a fresh trail so the new mission isn't drawn over the previous one.
+        await self.async_clear_path_trail()
+        self._last_mission_command_at = datetime.now(tz=UTC)
         result = await self.api.publish_commanddef_via_cloud_mqtt(commanddef)
         await self._write_debug_json(f"routine_execute_{debug_prefix}_result.json", result)
         return result

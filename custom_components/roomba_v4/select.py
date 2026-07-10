@@ -11,12 +11,30 @@ from .entity import RoombaV4Entity
 
 async def async_setup_entry(hass: HomeAssistant, entry: RoombaV4ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
     coordinator = hass.data[DOMAIN][entry.entry_id]
-    entities: list[SelectEntity] = [RoombaRoomSelect(coordinator), PreferredCleaningModeSelect(coordinator)]
+    entities: list[SelectEntity] = [RoombaMapSelect(coordinator), RoombaRoomSelect(coordinator), PreferredCleaningModeSelect(coordinator)]
     if coordinator.suction_level_options():
         entities.append(PreferredSuctionLevelSelect(coordinator))
     if coordinator.water_level_options():
         entities.append(PreferredWaterLevelSelect(coordinator))
     async_add_entities(entities)
+
+
+class RoombaMapSelect(RoombaV4Entity, SelectEntity):
+    _attr_name = "Map"
+
+    def __init__(self, coordinator) -> None:
+        RoombaV4Entity.__init__(self, coordinator, "map_select")
+
+    @property
+    def options(self) -> list[str]:
+        return self.coordinator.map_options()
+
+    @property
+    def current_option(self) -> str | None:
+        return self.coordinator.selected_map
+
+    async def async_select_option(self, option: str) -> None:
+        await self.coordinator.async_select_map(option)
 
 
 class RoombaRoomSelect(RoombaV4Entity, SelectEntity):
