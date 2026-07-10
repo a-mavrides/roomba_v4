@@ -1898,7 +1898,68 @@ class IRobotCloudApi:
 
         await asyncio.to_thread(_write)
 
+    async def _capture_app_last_command(self, topic: str | None, payload: Any) -> None:
+        """Capture the robot's echo of the last command it received (shadow `lastCommand`).
+
+        The robot reports the exact command payload it accepted under `lastCommand`. Running a
+        per-room clean from the official iRobot app makes this hold the real wire format the app
+        uses to restrict a clean to selected regions - the ground truth we need to replicate.
+        Debug-only: appended to app_last_command.json, never merged into live state.
+        """
+        found: dict[str, Any] | None = None
+
+        def visit(node: Any) -> None:
+            nonlocal found
+            if found is not None:
+                return
+            if isinstance(node, dict):
+                lc = node.get("lastCommand")
+                if isinstance(lc, dict) and lc.get("command"):
+                    found = lc
+                    return
+                # Some firmwares echo the command at top level (command + regions/select_all).
+                if node.get("command") and ("regions" in node or "select_all" in node or "pmap_id" in node):
+                    found = node
+                    return
+                for value in node.values():
+                    visit(value)
+            elif isinstance(node, list):
+                for item in node:
+                    visit(item)
+
+        try:
+            visit(payload)
+        except Exception:
+            return
+        if not found:
+            return
+        key = json.dumps(found, sort_keys=True, default=str)
+        if key == getattr(self, "_last_app_command_key", None):
+            return
+        self._last_app_command_key = key
+        history_path = self._event_debug_path("app_last_command.json")
+        if not history_path:
+            return
+
+        def _append() -> None:
+            items: list[Any] = []
+            if history_path.exists():
+                try:
+                    items.extend(json.loads(history_path.read_text(encoding="utf-8")))
+                except Exception:
+                    items = []
+            items.append({
+                "ts": datetime.now(tz=UTC).isoformat(),
+                "topic": topic,
+                "last_command": found,
+            })
+            items = items[-30:]
+            history_path.write_text(json.dumps(items, indent=2, default=str), encoding="utf-8")
+
+        await asyncio.to_thread(_append)
+
     async def _ingest_live_state_payload(self, topic: str | None, payload: Any) -> None:
+        await self._capture_app_last_command(topic, payload)
         mode = self._topic_merge_mode(topic)
         source_kind = self._topic_source_kind(topic)
         if mode == "software":
