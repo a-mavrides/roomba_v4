@@ -1679,6 +1679,10 @@ class IRobotCloudApi:
             app_clean["user_pmapv_id"] = pmapv_id
         if isinstance(regions, list) and regions:
             app_clean["regions"] = regions
+        if commanddef.get("smart_clean_id"):
+            app_clean["smart_clean_id"] = commanddef.get("smart_clean_id")
+        if commanddef.get("smart_clean_modified") is not None:
+            app_clean["smart_clean_modified"] = int(commanddef.get("smart_clean_modified"))
         if "select_all" in commanddef:
             app_clean["select_all"] = bool(commanddef.get("select_all"))
 

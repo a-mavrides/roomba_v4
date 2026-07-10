@@ -175,7 +175,7 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         self._restored_data = dict(base)
         if isinstance(self.data, dict):
             self.data["preferred_cleaning_mode"] = option
-        await self.store.async_save(base)
+        await self.store.async_save(base)
         self.async_update_listeners()
 
     async def async_set_preferred_suction_level(self, option: str) -> None:
@@ -186,7 +186,7 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         self._restored_data = dict(base)
         if isinstance(self.data, dict):
             self.data["preferred_suction_level"] = option
-        await self.store.async_save(base)
+        await self.store.async_save(base)
         self.async_update_listeners()
 
     async def async_set_preferred_water_level(self, option: str) -> None:
@@ -197,8 +197,22 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         self._restored_data = dict(base)
         if isinstance(self.data, dict):
             self.data["preferred_water_level"] = option
-        await self.store.async_save(base)
+        await self.store.async_save(base)
         self.async_update_listeners()
+
+    def _region_smart_clean(self, region_id: str) -> tuple[str | None, dict[str, Any]]:
+        """Return (smart_clean_id, existing smart_clean_prefs) for a region from clean_score."""
+        clean_score = (self.data or self._restored_data or {}).get("clean_score") or {}
+        clean_scores = clean_score.get("clean_scores") if isinstance(clean_score, dict) else None
+        for item in clean_scores or []:
+            if not isinstance(item, dict):
+                continue
+            sc_id = item.get("smart_clean_id")
+            for region in item.get("regions") or []:
+                if isinstance(region, dict) and str(region.get("region_id")) == str(region_id):
+                    prefs = region.get("smart_clean_prefs")
+                    return sc_id, (prefs if isinstance(prefs, dict) else {})
+        return None, {}
 
     def _build_smart_clean_prefs_update(self, existing: dict[str, Any] | None) -> dict[str, Any]:
         """Merge the current mode/suction/water preferences into a region's saved prefs."""
@@ -2416,19 +2430,25 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         pmapv_id = (self.data.get("active_map_version") if isinstance(self.data, dict) else None) or ((((robot_state or {}).get("user_p2mapv_id") or (robot_state or {}).get("pmapv_id")) if isinstance(robot_state, dict) else None))
         feature_ctx = self._room_feature_context(room, region_candidates)
         region_id = str(region_candidates[0])
-        # A region clean must NOT carry a top-level operatingMode - that makes the robot treat
-        # it as a whole-map clean and ignore the region restriction. Send ONLY the region
-        # (ordered + pmap id); the robot uses its saved per-region mode (clean_score shows all
-        # regions configured operatingMode:6 = mop).
+        # Mirror the app's region clean with user-chosen settings: per-region params in the
+        # robot's smart_clean_prefs shape + smart_clean_id + smart_clean_modified=1 (USERMODIFIED).
+        # That flag is what makes the robot honor the command's params (and persist them) instead
+        # of ignoring per-region params (which it does when the flag/id are absent). ordered +
+        # pmap id restrict it to the region.
+        smart_clean_id, existing_prefs = self._region_smart_clean(region_id)
+        region_params = self._build_smart_clean_prefs_update(existing_prefs)
         commanddef: dict[str, Any] = {
             "robot_id": self.robot_blid,
             "command": "start",
             "ordered": 1,
             "regions": [
-                {"region_id": region_id, "type": "rid"}
+                {"region_id": region_id, "type": "rid", "params": region_params}
             ],
+            "smart_clean_modified": 1,
             "_preferred_payload_variant": "app_clean",
         }
+        if smart_clean_id:
+            commanddef["smart_clean_id"] = smart_clean_id
         if p2map_id:
             commanddef["p2map_id"] = p2map_id
         if pmapv_id:
