@@ -2392,19 +2392,14 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         pmapv_id = (self.data.get("active_map_version") if isinstance(self.data, dict) else None) or ((((robot_state or {}).get("user_p2mapv_id") or (robot_state or {}).get("pmapv_id")) if isinstance(robot_state, dict) else None))
         feature_ctx = self._room_feature_context(room, region_candidates)
         region_id = str(region_candidates[0])
-        operating_mode = self._preferred_operating_mode_value()
-        # Combine what works: TOP-LEVEL operatingMode (the proven clean-all mop trigger) plus
-        # regions purely for targeting (no per-region params, which this robot rejects). The
-        # global operatingMode applies to the targeted region.
-        params: dict[str, Any] = {}
-        if operating_mode is not None:
-            params["operatingMode"] = operating_mode
-
+        # A region clean must NOT carry a top-level operatingMode - that makes the robot treat
+        # it as a whole-map clean and ignore the region restriction. Send ONLY the region
+        # (ordered + pmap id); the robot uses its saved per-region mode (clean_score shows all
+        # regions configured operatingMode:6 = mop).
         commanddef: dict[str, Any] = {
             "robot_id": self.robot_blid,
             "command": "start",
             "ordered": 1,
-            "params": params,
             "regions": [
                 {"region_id": region_id, "type": "rid"}
             ],
