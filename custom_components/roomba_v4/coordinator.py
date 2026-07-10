@@ -214,58 +214,6 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
                     return sc_id, (prefs if isinstance(prefs, dict) else {})
         return None, {}
 
-    def _build_smart_clean_prefs_update(self, existing: dict[str, Any] | None) -> dict[str, Any]:
-        """Merge the current mode/suction/water preferences into a region's saved prefs."""
-        prefs = dict(existing) if isinstance(existing, dict) else {}
-        mode = self._preferred_operating_mode_value()
-        if mode is not None:
-            prefs["operatingMode"] = mode
-        suction = self._normalize_suction_level_value(self.preferred_suction_level())
-        if suction is not None:
-            prefs["suctionLevel"] = suction
-        water = self._normalize_water_level_value(self.preferred_water_level())
-        if self.supports_mopping() and water is not None:
-            prefs["padWetness"] = {"padPlate": water}
-        prefs.setdefault("twoPass", False)
-        prefs.setdefault("carpetBoost", False)
-        prefs.setdefault("swScrub", 0)
-        return prefs
-
-    async def async_apply_preferences_to_all_regions(self) -> None:
-        """Write the current mode/suction/water settings into every region's saved config.
-
-        This is what makes integration settings actually take effect on the robot: per-room
-        (and mode-less) cleans obey the saved smart_clean_prefs, which the app writes via the
-        clean-score endpoint. Best-effort; never raises.
-        """
-        clean_score = (self.data or self._restored_data or {}).get("clean_score") or {}
-        clean_scores = clean_score.get("clean_scores") if isinstance(clean_score, dict) else None
-        if not isinstance(clean_scores, list):
-            return
-        wrote = False
-        for item in clean_scores:
-            if not isinstance(item, dict):
-                continue
-            smart_clean_id = item.get("smart_clean_id")
-            p2map_id = item.get("p2map_id") or (self.data.get("active_map_id") if isinstance(self.data, dict) else None)
-            for region in item.get("regions") or []:
-                if not isinstance(region, dict):
-                    continue
-                region_id = region.get("region_id")
-                if region_id is None:
-                    continue
-                prefs = self._build_smart_clean_prefs_update(region.get("smart_clean_prefs"))
-                try:
-                    await self.api.write_smart_clean_prefs(p2map_id, smart_clean_id, str(region_id), prefs)
-                    wrote = True
-                except Exception as err:
-                    _LOGGER.debug("roomba_v4 debug: write smart_clean_prefs region %s failed: %s", region_id, err)
-        if wrote:
-            try:
-                await self.async_request_refresh()
-            except Exception:
-                pass
-
     def current_operating_mode_value(self) -> int | None:
         live_state = (self.data or self._restored_data or {}).get("live_state") or {}
         cms = live_state.get("cleanMissionStatus") if isinstance(live_state.get("cleanMissionStatus"), dict) else {}
