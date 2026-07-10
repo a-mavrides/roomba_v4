@@ -2375,45 +2375,49 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
 
         robot_state = self.data.get("robot") if isinstance(self.data, dict) else None
         p2map_id = (self.data.get("active_map_id") if isinstance(self.data, dict) else None) or ((robot_state or {}).get("p2map_id") if isinstance(robot_state, dict) else None)
+        pmapv_id = (self.data.get("active_map_version") if isinstance(self.data, dict) else None) or ((((robot_state or {}).get("user_p2mapv_id") or (robot_state or {}).get("pmapv_id")) if isinstance(robot_state, dict) else None))
         feature_ctx = self._room_feature_context(room, region_candidates)
         region_id = str(region_candidates[0])
-        # Mirror the app's region clean with user-chosen settings: per-region params in the
-        # robot's smart_clean_prefs shape + smart_clean_id + smart_clean_modified=1 (USERMODIFIED).
-        # That flag is what makes the robot honor the command's params (and persist them) instead
-        # of ignoring per-region params (which it does when the flag/id are absent). ordered +
-        # pmap id restrict it to the region.
-        smart_clean_id, _existing_prefs = self._region_smart_clean(region_id)
-        # Byte-for-byte match of the app's stored favorite commanddef (favorites_json_data.json):
-        #   region params = {scrub, padWetness:{disposable,reusable}, twoPass, noAutoPasses,
-        #   operatingMode}; commanddef = {id, robot_id, command, pmap_id, ordered, regions,
-        #   smart_clean_id}. The real favorite carries NO user_pmapv_id and NO smart_clean_modified
-        #   inside the commanddef, and NEVER select_all - so we omit them too. padWetness is present
-        #   in every region even for vacuum-only (operatingMode 2), so we always include it.
-        operating_mode = self._preferred_operating_mode_value()
-        water = self._normalize_water_level_value(self.preferred_water_level())
-        if water is None:
-            water = 2
-        region_params: dict[str, Any] = {
-            "scrub": 0,
-            "padWetness": {"disposable": water, "reusable": water},
-            "twoPass": False,
-            "noAutoPasses": True,
-        }
+        # Ground truth: the robot's own lastCommand echo of an app per-room clean is a FLAT command
+        #   {command:"start", initiator:"rmtApp", time, ordered:1, p2map_id, params:{profile},
+        #    regions:[{region_id, type:"rid", params:{operatingMode, suctionLevel, carpetBoost,
+        #    twoPass, (padWetness for mop)}}], user_p2mapv_id}
+        # The map ids are p2map_id / user_p2mapv_id (with the 2) and BOTH are required - that (not
+        # the wrapper or smart_clean_id) is what restricts the clean to the region. Region params
+        # carry the user's live choices (mode/suction), falling back to the region's saved prefs.
+        _smart_clean_id, existing = self._region_smart_clean(region_id)
+        existing = existing if isinstance(existing, dict) else {}
+        operating_mode = self._preferred_operating_mode_value() or existing.get("operatingMode")
+        suction = self._normalize_suction_level_value(
+            self.preferred_suction_level(), fallback=existing.get("suctionLevel")
+        )
+        region_params: dict[str, Any] = {"twoPass": bool(existing.get("twoPass", False))}
         if operating_mode is not None:
             region_params["operatingMode"] = operating_mode
+        if suction is not None:
+            region_params["suctionLevel"] = suction
+        region_params["carpetBoost"] = bool(existing.get("carpetBoost", False))
+        if operating_mode in {1, 3, 6} and self.supports_mopping():
+            saved_pad = existing.get("padWetness") if isinstance(existing.get("padWetness"), dict) else {}
+            water = self._normalize_water_level_value(
+                self.preferred_water_level(), fallback=saved_pad.get("padPlate")
+            )
+            if water is not None:
+                region_params["padWetness"] = {"padPlate": water}
         commanddef: dict[str, Any] = {
             "robot_id": self.robot_blid,
             "command": "start",
             "ordered": 1,
+            "params": {"profile": self._profile_name_for_command()},
             "regions": [
                 {"region_id": region_id, "type": "rid", "params": region_params}
             ],
-            "_preferred_payload_variant": "app_favorite",
+            "_preferred_payload_variant": "app_region_clean",
         }
-        if smart_clean_id:
-            commanddef["smart_clean_id"] = smart_clean_id
         if p2map_id:
             commanddef["p2map_id"] = p2map_id
+        if pmapv_id:
+            commanddef["user_p2mapv_id"] = pmapv_id
 
         await self._write_debug_json("routine_execute_clean_selected_room_context.json", {
             "selected_room": self.selected_room,

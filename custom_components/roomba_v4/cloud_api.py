@@ -1349,7 +1349,7 @@ class IRobotCloudApi:
 
     def _preferred_payload_order(self, commanddef: dict[str, Any]) -> list[str]:
         preferred = commanddef.get("_preferred_payload_variant")
-        base = ["raw_commanddef_payload", "robot_command_envelope", "commanddef_wrapped", "apk_commanddefs_upper", "apk_commanddefs_lower", "mission_shadow_desired", "app_clean", "app_favorite"]
+        base = ["raw_commanddef_payload", "robot_command_envelope", "commanddef_wrapped", "apk_commanddefs_upper", "apk_commanddefs_lower", "mission_shadow_desired", "app_clean", "app_favorite", "app_region_clean"]
         if isinstance(preferred, str) and preferred in base:
             return [preferred] + [name for name in base if name != preferred]
         return base
@@ -1662,6 +1662,28 @@ class IRobotCloudApi:
         if "select_all" in commanddef:
             app_clean["select_all"] = bool(commanddef.get("select_all"))
 
+        # Ground truth from the robot's own lastCommand echo of an app (rmtApp) per-room clean:
+        #   {command:"start", initiator:"rmtApp", time, ordered:1,
+        #    p2map_id, params:{profile:"normal"},
+        #    regions:[{region_id, type:"rid", params:{operatingMode, suctionLevel, carpetBoost, twoPass, ...}}],
+        #    user_p2mapv_id}
+        # Flat (no commanddefs wrapper), NO select_all / smart_clean_id, and crucially the map
+        # ids are p2map_id / user_p2mapv_id (with the 2) - the misspelled pmap_id/user_pmapv_id
+        # is why the region restriction was ignored. Suction rides inline as suctionLevel.
+        app_region_clean: dict[str, Any] = {
+            "command": command_lower,
+            "initiator": "rmtApp",
+            "time": payload_obj["time"],
+            "ordered": int(commanddef.get("ordered")) if commanddef.get("ordered") is not None else 1,
+        }
+        if p2map_id:
+            app_region_clean["p2map_id"] = p2map_id
+        app_region_clean["params"] = params if isinstance(params, dict) and params else {"profile": "normal"}
+        if isinstance(regions, list) and regions:
+            app_region_clean["regions"] = regions
+        if pmapv_id:
+            app_region_clean["user_p2mapv_id"] = pmapv_id
+
         # App serializes commands as a CommandListDef under `commanddefs` (APK/favorite shape):
         #   {commanddefs:[{command,id,robot_id,pmap_id,ordered,regions:[{region_id,type,params}],smart_clean_id}]}
         app_fav_routine: dict[str, Any] = {"command": command_lower, "id": "1", "robot_id": robot_id}
@@ -1683,6 +1705,7 @@ class IRobotCloudApi:
             app_fav_routine["select_all"] = bool(commanddef.get("select_all"))
 
         variants: list[tuple[str, dict[str, Any]]] = [
+            ("app_region_clean", app_region_clean),
             ("app_favorite", {"commanddefs": [app_fav_routine]}),
             ("app_clean", app_clean),
             ("apk_commanddefs_upper", {"commanddefs": [routine_upper]}),
