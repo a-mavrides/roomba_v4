@@ -114,6 +114,7 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         self._active_since: datetime | None = None
         self._last_mission_command_at: datetime | None = None
         self._last_livemap_traj_key: str | None = None
+        self._last_mission_id: str | None = None
         self.api.add_live_state_listener(self._handle_live_state_update)
         self._last_event_signature: str | None = None
         self._last_event_at: datetime | None = None
@@ -450,9 +451,12 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         # stale dock.contact/known flag lingers in the sticky-merged shadow state.
         # Without this guard, a leftover dock flag makes a running robot report
         # "docked" on every message that doesn't also carry a fresh dock update.
-        if phase in {"run", "resume", "new", "explore", "evac", "hmusr", "hmmidmssn", "return", "returning", "homing", "dockroute", "dockroutecomplete"}:
+        # hm* phases are homing/returning-to-dock (iRobot: hmUsrDock=user-requested dock,
+        # hmMidMsn=mid-mission recharge, hmPostMsn=post-mission). The capture confirms
+        # hmUsrDock reports cycle="dock" while still en route - that is "returning", NOT docked.
+        if phase in {"run", "resume", "new", "explore", "evac", "hmusr", "hmusrdock", "hmmidmssn", "hmpostmsn", "return", "returning", "homing", "dockroute", "dockroutecomplete"}:
             return False
-        if phase in {"charge", "chargecompleted", "recharge", "hmusrdock", "dockend", "dock"}:
+        if phase in {"charge", "chargecompleted", "recharge", "dockend", "dock"}:
             return True
         if dock.get("contact") is True:
             return True
@@ -470,7 +474,7 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         dock = live_state.get("dock") if isinstance(live_state.get("dock"), dict) else {}
         if self._is_definitely_docked(live_state):
             return "docked"
-        if phase in {"run", "resume", "new", "explore", "evac", "hmusr", "hmusrdock"}:
+        if phase in {"run", "resume", "new", "explore", "evac", "hmusr"}:
             return "cleaning"
         if phase in {"pause", "paused"}:
             return "paused"
@@ -478,7 +482,7 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
             if cycle == "clean":
                 return "idle"
             return "idle"
-        if phase in {"hmmidmssn", "return", "returning", "homing", "dockroute", "dockroutecomplete"}:
+        if phase in {"hmusrdock", "hmmidmssn", "hmpostmsn", "return", "returning", "homing", "dockroute", "dockroutecomplete"}:
             return "returning"
         if phase in {"stuck", "cancelled", "error"}:
             return "error"
@@ -508,13 +512,13 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
             return "Roomba is cleaning"
         if phase in {"pause", "paused"}:
             return "Roomba is paused"
-        if phase in {"hmmidmssn", "return", "returning", "homing", "dockroute", "dockroutecomplete", "dock"}:
+        if phase in {"hmusrdock", "hmmidmssn", "hmpostmsn", "return", "returning", "homing", "dockroute", "dockroutecomplete"}:
             return "Roomba is returning to the dock"
         if phase == "stop":
             if cycle == "clean":
                 return "Roomba is ready to clean"
             return "Roomba is idle"
-        if phase in {"charge", "chargecompleted", "recharge", "hmusrdock", "dockend"} and cycle in {"none", "idle", ""}:
+        if phase in {"charge", "chargecompleted", "recharge", "dockend"} and cycle in {"none", "idle", ""}:
             if bin_present is False:
                 return "Roomba is docked, but the bin is missing"
             mop_ready = bool(tank_present) and detected_pad not in {"", "nopad", "none", "unknown", "false", "0"}
@@ -535,14 +539,20 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         dock_known = bool(status.get("dock_known"))
         dock_contact = bool(status.get("dock_contact"))
 
-        idle_like_phase = {"stop", "idle", "ready", "startup_shadow_refresh", "charge", "chargecompleted", "dock", "dockend", "recharge", "hmusrdock", ""}
+        idle_like_phase = {"stop", "idle", "ready", "startup_shadow_refresh", "charge", "chargecompleted", "dock", "dockend", "recharge", ""}
         idle_like_cycle = {"none", "idle", ""}
-        docking_like_phase = {"charge", "chargecompleted", "dock", "dockend", "recharge", "hmusrdock"}
+        docking_like_phase = {"charge", "chargecompleted", "dock", "dockend", "recharge"}
+        returning_like_phase = {"hmusrdock", "hmmidmssn", "hmpostmsn", "return", "returning", "homing", "dockroute", "dockroutecomplete"}
         idle_like_message = any(token in message for token in {"idle", "ready"})
         docked_like_message = any(token in message for token in {"docked", "charging", "at the dock", "at dock", "home"})
 
         if self._is_definitely_docked(live_state):
             return "docked"
+
+        # Homing phases are unambiguously "returning" - decide before the idle/dock heuristics
+        # so a lingering dock flag can't mislabel a robot that is on its way back.
+        if phase in returning_like_phase:
+            return "returning"
 
         # On this model the explicit dock flags are often absent after a successful
         # return. When mission cycle has already collapsed to none/idle and the
@@ -593,6 +603,27 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
 
         # Never hold back error/paused/idle/etc; the phantom only affects mission states.
         if raw_state not in DEBOUNCED_STATES:
+            return raw_state
+
+        # The phantom is specifically a brief "run" burst while parked; "returning" is never a
+        # phantom, so never hold it back (doing so mislabelled homing robots as docked).
+        if raw_state == "returning":
+            self._active_since = None
+            return raw_state
+
+        # A genuine mission runs a real clean cycle and accumulates area; a phantom burst on
+        # the dock does neither (cycle stays none/charge, sqft stays 0). Trust a real mission
+        # immediately - this is what an app-initiated clean looks like (no command from us,
+        # robot already away from the dock). Without this, app-started cleans get suppressed
+        # to "docked" for their whole run, which also starved the live path of trajectory
+        # refreshes. Note: this robot never reports mssnM, so key off cycle/sqft.
+        cycle = str(status.get("mission_cycle") or "").lower()
+        sqft = status.get("mission_sqft")
+        real_cycle = cycle in {"clean", "spot", "quick", "train"}
+        real_area = isinstance(sqft, (int, float)) and sqft > 0
+        if real_cycle or real_area:
+            self._active_since = None
+            self._docked_anchor = None
             return raw_state
 
         # Trust a recently commanded start/return. Covers the on-dock recalibration phase
@@ -1230,7 +1261,22 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
             # and the poll interval drops to 20s.
             prev_live_state = (self.data or self._restored_data or {}).get("live_state")
             prev_livemap = prev_live_state.get("livemap") if isinstance(prev_live_state, dict) else None
-            if isinstance(prev_livemap, dict) and prev_livemap.get("cumulative_path_points"):
+            # Detect a fresh mission (new missionId / nMssn) so we don't paint a new run over
+            # the previous run's trail. This matters most for app-initiated cleans, where we
+            # never call async_clear_path_trail ourselves.
+            cur_cms = live_state.get("cleanMissionStatus") if isinstance(live_state.get("cleanMissionStatus"), dict) else {}
+            mission_key = str(cur_cms.get("missionId") or cur_cms.get("nMssn") or "")
+            new_mission = bool(mission_key) and mission_key != self._last_mission_id
+            if mission_key:
+                self._last_mission_id = mission_key
+            if new_mission:
+                cur_livemap = live_state.get("livemap") if isinstance(live_state.get("livemap"), dict) else {}
+                if isinstance(cur_livemap, dict):
+                    cur_livemap["cumulative_path_points"] = []
+                    cur_livemap["cumulative_path_points_count"] = 0
+                    live_state["livemap"] = cur_livemap
+                self._last_livemap_traj_key = None
+            elif isinstance(prev_livemap, dict) and prev_livemap.get("cumulative_path_points"):
                 cur_livemap = live_state.get("livemap") if isinstance(live_state.get("livemap"), dict) else {}
                 if not isinstance(cur_livemap, dict):
                     cur_livemap = {}
