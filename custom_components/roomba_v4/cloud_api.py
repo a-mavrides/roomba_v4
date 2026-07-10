@@ -676,6 +676,30 @@ class IRobotCloudApi:
             {"p2map_id": p2map_id},
         )
 
+    async def write_smart_clean_prefs(self, p2map_id: str, smart_clean_id: str | None, region_id: str, prefs: dict[str, Any]) -> dict[str, Any]:
+        """Write a region's saved smart_clean_prefs (mode/suction/water) to the robot.
+
+        The app POSTs to /v1/p2maps/clean-score with the region and its SmartCleanPrefs; those
+        saved prefs are what per-room (and mode-less) cleans obey. Best-effort; returns status.
+        """
+        body: dict[str, Any] = {
+            "p2map_id": p2map_id,
+            "region_id": str(region_id),
+            "smart_clean_prefs": prefs,
+        }
+        if smart_clean_id:
+            body["smart_clean_id"] = smart_clean_id
+        status, data, txt = await self._aws_json_request(
+            f"{self.deployment['httpBaseAuth']}/v1/p2maps/clean-score",
+            method="POST",
+            payload_obj=body,
+        )
+        await self._write_runtime_debug("write_smart_clean_prefs", {
+            "body": body, "status": status, "response_text": txt[:1500],
+            "ts": datetime.now(tz=UTC).isoformat(),
+        })
+        return {"status": status, "response": data}
+
     async def get_p2map_routines(self, p2map_id: str, limit: int = 50) -> list[dict[str, Any]]:
         return await self._aws_request(
             f"{self.deployment['httpBaseAuth']}/v1/p2maps/{p2map_id}/routines",
