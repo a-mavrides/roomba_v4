@@ -2375,7 +2375,6 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
 
         robot_state = self.data.get("robot") if isinstance(self.data, dict) else None
         p2map_id = (self.data.get("active_map_id") if isinstance(self.data, dict) else None) or ((robot_state or {}).get("p2map_id") if isinstance(robot_state, dict) else None)
-        pmapv_id = (self.data.get("active_map_version") if isinstance(self.data, dict) else None) or ((((robot_state or {}).get("user_p2mapv_id") or (robot_state or {}).get("pmapv_id")) if isinstance(robot_state, dict) else None))
         feature_ctx = self._room_feature_context(room, region_candidates)
         region_id = str(region_candidates[0])
         # Mirror the app's region clean with user-chosen settings: per-region params in the
@@ -2384,16 +2383,24 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         # of ignoring per-region params (which it does when the flag/id are absent). ordered +
         # pmap id restrict it to the region.
         smart_clean_id, _existing_prefs = self._region_smart_clean(region_id)
-        # App favorite per-region params shape: scrub, padWetness{disposable,reusable}, twoPass,
-        # noAutoPasses, operatingMode. Sent inside a commanddefs wrapper (app_favorite variant),
-        # with smart_clean_id + smart_clean_modified=1 so the robot honors these params.
+        # Byte-for-byte match of the app's stored favorite commanddef (favorites_json_data.json):
+        #   region params = {scrub, padWetness:{disposable,reusable}, twoPass, noAutoPasses,
+        #   operatingMode}; commanddef = {id, robot_id, command, pmap_id, ordered, regions,
+        #   smart_clean_id}. The real favorite carries NO user_pmapv_id and NO smart_clean_modified
+        #   inside the commanddef, and NEVER select_all - so we omit them too. padWetness is present
+        #   in every region even for vacuum-only (operatingMode 2), so we always include it.
         operating_mode = self._preferred_operating_mode_value()
-        region_params: dict[str, Any] = {"scrub": 0, "twoPass": False, "noAutoPasses": True}
+        water = self._normalize_water_level_value(self.preferred_water_level())
+        if water is None:
+            water = 2
+        region_params: dict[str, Any] = {
+            "scrub": 0,
+            "padWetness": {"disposable": water, "reusable": water},
+            "twoPass": False,
+            "noAutoPasses": True,
+        }
         if operating_mode is not None:
             region_params["operatingMode"] = operating_mode
-        water = self._normalize_water_level_value(self.preferred_water_level())
-        if self.supports_mopping() and operating_mode in {1, 3, 6} and water is not None:
-            region_params["padWetness"] = {"disposable": water, "reusable": water}
         commanddef: dict[str, Any] = {
             "robot_id": self.robot_blid,
             "command": "start",
@@ -2401,15 +2408,12 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
             "regions": [
                 {"region_id": region_id, "type": "rid", "params": region_params}
             ],
-            "smart_clean_modified": 1,
             "_preferred_payload_variant": "app_favorite",
         }
         if smart_clean_id:
             commanddef["smart_clean_id"] = smart_clean_id
         if p2map_id:
             commanddef["p2map_id"] = p2map_id
-        if pmapv_id:
-            commanddef["user_p2mapv_id"] = pmapv_id
 
         await self._write_debug_json("routine_execute_clean_selected_room_context.json", {
             "selected_room": self.selected_room,
