@@ -1373,7 +1373,7 @@ class IRobotCloudApi:
 
     def _preferred_payload_order(self, commanddef: dict[str, Any]) -> list[str]:
         preferred = commanddef.get("_preferred_payload_variant")
-        base = ["raw_commanddef_payload", "robot_command_envelope", "commanddef_wrapped", "apk_commanddefs_upper", "apk_commanddefs_lower", "mission_shadow_desired", "app_clean"]
+        base = ["raw_commanddef_payload", "robot_command_envelope", "commanddef_wrapped", "apk_commanddefs_upper", "apk_commanddefs_lower", "mission_shadow_desired", "app_clean", "app_favorite"]
         if isinstance(preferred, str) and preferred in base:
             return [preferred] + [name for name in base if name != preferred]
         return base
@@ -1686,7 +1686,28 @@ class IRobotCloudApi:
         if "select_all" in commanddef:
             app_clean["select_all"] = bool(commanddef.get("select_all"))
 
+        # App serializes commands as a CommandListDef under `commanddefs` (APK/favorite shape):
+        #   {commanddefs:[{command,id,robot_id,pmap_id,ordered,regions:[{region_id,type,params}],smart_clean_id}]}
+        app_fav_routine: dict[str, Any] = {"command": command_lower, "id": "1", "robot_id": robot_id}
+        if p2map_id:
+            app_fav_routine["pmap_id"] = p2map_id
+        if commanddef.get("ordered") is not None:
+            app_fav_routine["ordered"] = int(commanddef.get("ordered"))
+        if isinstance(params, dict) and params:
+            app_fav_routine["params"] = params
+        if isinstance(regions, list) and regions:
+            app_fav_routine["regions"] = regions
+        if commanddef.get("smart_clean_id"):
+            app_fav_routine["smart_clean_id"] = commanddef.get("smart_clean_id")
+        if pmapv_id:
+            app_fav_routine["user_pmapv_id"] = pmapv_id
+        if commanddef.get("smart_clean_modified") is not None:
+            app_fav_routine["smart_clean_modified"] = int(commanddef.get("smart_clean_modified"))
+        if "select_all" in commanddef:
+            app_fav_routine["select_all"] = bool(commanddef.get("select_all"))
+
         variants: list[tuple[str, dict[str, Any]]] = [
+            ("app_favorite", {"commanddefs": [app_fav_routine]}),
             ("app_clean", app_clean),
             ("apk_commanddefs_upper", {"commanddefs": [routine_upper]}),
             ("apk_commanddefs_lower", {"commanddefs": [routine_lower]}),
