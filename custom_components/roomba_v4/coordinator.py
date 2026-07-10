@@ -175,8 +175,7 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         self._restored_data = dict(base)
         if isinstance(self.data, dict):
             self.data["preferred_cleaning_mode"] = option
-        await self.store.async_save(base)
-        await self.async_apply_preferences_to_all_regions()
+        await self.store.async_save(base)
         self.async_update_listeners()
 
     async def async_set_preferred_suction_level(self, option: str) -> None:
@@ -187,8 +186,7 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         self._restored_data = dict(base)
         if isinstance(self.data, dict):
             self.data["preferred_suction_level"] = option
-        await self.store.async_save(base)
-        await self.async_apply_preferences_to_all_regions()
+        await self.store.async_save(base)
         self.async_update_listeners()
 
     async def async_set_preferred_water_level(self, option: str) -> None:
@@ -199,8 +197,7 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         self._restored_data = dict(base)
         if isinstance(self.data, dict):
             self.data["preferred_water_level"] = option
-        await self.store.async_save(base)
-        await self.async_apply_preferences_to_all_regions()
+        await self.store.async_save(base)
         self.async_update_listeners()
 
     def _build_smart_clean_prefs_update(self, existing: dict[str, Any] | None) -> dict[str, Any]:
