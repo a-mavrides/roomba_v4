@@ -1,6 +1,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
@@ -18,6 +20,7 @@ SERVICE_REFRESH_MAP_FROM_ARCHIVE = "refresh_map_from_archive"
 SERVICE_REFRESH_MAP_FROM_URL = "refresh_map_from_url"
 SERVICE_CLEAR_PATH_HISTORY = "clear_path_history"
 SERVICE_CLEAN_ROOM = "clean_room"
+SERVICE_SPOT_CLEAN = "spot_clean"
 
 async def _async_reload_entry(hass: HomeAssistant, entry: RoombaV4ConfigEntry) -> None:
     await hass.config_entries.async_reload(entry.entry_id)
@@ -32,6 +35,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: RoombaV4ConfigEntry) -> 
         country_code=entry.data.get(CONF_COUNTRY_CODE, "US"),
         session=session,
     )
+    client_config = entry.data.get("cloud_client_config")
+    if not isinstance(client_config, dict) or not all(client_config.get(key) for key in ("appId", "deviceId")):
+        identity = f"{hass.config.config_dir}:{entry.entry_id}"
+        client_config = {
+            "appId": str(uuid.uuid5(uuid.NAMESPACE_URL, f"roomba_v4:app:{identity}")),
+            "deviceId": str(uuid.uuid5(uuid.NAMESPACE_URL, f"roomba_v4:device:{identity}")),
+        }
+        hass.config_entries.async_update_entry(entry, data={**entry.data, "cloud_client_config": client_config})
+    api.config = dict(client_config)
     api.local_mqtt_ip_override = ""
     debug_enabled = get_debug_enabled(entry)
     coordinator = RoombaV4Coordinator(
@@ -108,6 +120,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: RoombaV4ConfigEntry) -> 
                 vol.Required("room_name"): str,
                 vol.Optional("entry_id"): str,
             }),
+        )
+
+    if not hass.services.has_service(DOMAIN, SERVICE_SPOT_CLEAN):
+        async def _handle_spot_clean(call: ServiceCall) -> None:
+            entry_id = call.data.get("entry_id")
+            coordinators = hass.data[DOMAIN]
+            if entry_id:
+                coordinator = coordinators.get(entry_id)
+                if coordinator is None:
+                    raise vol.Invalid("Unknown Roomba entry")
+            elif len(coordinators) == 1:
+                coordinator = next(iter(coordinators.values()))
+            else:
+                raise vol.Invalid("Specify entry_id to select which robot should clean the spot")
+            await coordinator.async_spot_clean(call.data["x"], call.data["y"])
+
+        hass.services.async_register(
+            DOMAIN, SERVICE_SPOT_CLEAN, _handle_spot_clean,
+            schema=vol.Schema({vol.Required("x"): vol.Coerce(float), vol.Required("y"): vol.Coerce(float), vol.Optional("entry_id"): str}),
         )
 
     if not hass.services.has_service(DOMAIN, SERVICE_CLEAR_PATH_HISTORY):

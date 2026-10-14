@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from math import isfinite
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from .cloud_api import CloudApiError, IRobotCloudApi
 from .const import ACTIVE_UPDATE_INTERVAL, DOCKED_UPDATE_INTERVAL, EVENT_TYPE, IDLE_UPDATE_INTERVAL, STORAGE_KEY_PREFIX, STORAGE_VERSION, UPDATE_INTERVAL
 from .debug import get_debug_dir, get_legacy_debug_dir
+from .freshness import telemetry_freshness
 from .map_renderer import extract_map_render_metadata, extract_room_info_from_archive, room_names_from_info, render_archive_to_png_bytes
 
 _LOGGER = logging.getLogger(__name__)
@@ -410,42 +412,34 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         return base
 
     def _is_definitely_docked(self, live_state: dict[str, Any]) -> bool:
-        cms = live_state.get("cleanMissionStatus") if isinstance(live_state.get("cleanMissionStatus"), dict) else {}
+        cms = live_state.get("cleanMissionStatus") or {}
         phase = str(cms.get("phase") or "").lower()
-        cycle = str(cms.get("cycle") or "").lower()
-        dock = live_state.get("dock") if isinstance(live_state.get("dock"), dict) else {}
-        if phase in {"charge", "chargecompleted", "recharge", "hmusrdock", "dockend", "dock"}:
-            return True
-        if dock.get("contact") is True:
-            return True
-        if dock.get("known") is True and cycle in {"none", "idle", ""}:
-            return True
-        # Some models briefly report stop/idle or empty cycle before explicit dock contact arrives.
-        if phase in {"stop", "idle", "ready", "startup_shadow_refresh", ""} and cycle in {"none", "idle", ""} and dock.get("known") is True:
-            return True
-        return False
+        # Knowing where the dock is does not mean the robot is on it.
+        if phase in {"run", "resume", "new", "explore", "pause", "paused",
+                     "hmusr", "hmusrdock", "hmmidmssn", "return", "returning",
+                     "homing", "dockroute", "dockroutecomplete", "stop", "idle", "ready", "cancelled"}:
+            return False
+        dock = live_state.get("dock") or {}
+        return phase in {"charge", "chargecompleted", "recharge", "dockend", "dock", "evac"} or dock.get("contact") is True
 
     def _derive_vacuum_state(self, live_state: dict[str, Any]) -> str:
-        cms = live_state.get("cleanMissionStatus") if isinstance(live_state.get("cleanMissionStatus"), dict) else {}
+        cms = live_state.get("cleanMissionStatus") or {}
         phase = str(cms.get("phase") or "").lower()
         cycle = str(cms.get("cycle") or "").lower()
-        dock = live_state.get("dock") if isinstance(live_state.get("dock"), dict) else {}
+        if cms.get("error") not in (None, 0, "0") or phase in {"stuck", "error"}:
+            return "error"
         if self._is_definitely_docked(live_state):
             return "docked"
-        if phase in {"run", "resume", "new", "explore", "evac", "hmusr", "hmusrdock"}:
+        if phase in {"run", "resume", "new", "explore"}:
             return "cleaning"
         if phase in {"pause", "paused"}:
             return "paused"
-        if phase == "stop":
-            if cycle == "clean":
-                return "idle"
-            return "idle"
-        if phase in {"hmmidmssn", "return", "returning", "homing", "dockroute", "dockroutecomplete"}:
+        if phase in {"hmusr", "hmusrdock", "hmmidmssn", "return", "returning", "homing", "dockroute", "dockroutecomplete"}:
             return "returning"
-        if phase in {"stuck", "cancelled", "error"}:
-            return "error"
-        if dock.get("known") is True and cycle in {"none", "idle", ""}:
-            return "docked"
+        if phase == "stop" and cycle not in {"", "none", "idle"}:
+            return "paused"
+        if phase in {"stop", "idle", "ready", "cancelled"} or cycle in {"none", "idle"}:
+            return "idle"
         return self._restored_data.get("vacuum_state") or "idle"
 
     def _derive_status_message(self, status: dict[str, Any]) -> str:
@@ -461,17 +455,17 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
             return f"Roomba needs attention (error {error})"
         if not_ready not in (None, 0, "0"):
             return f"Roomba is not ready ({not_ready})"
-        if phase in {"run", "resume", "new", "explore", "evac", "hmusr"}:
+        if phase in {"run", "resume", "new", "explore"}:
             return "Roomba is cleaning"
         if phase in {"pause", "paused"}:
             return "Roomba is paused"
-        if phase in {"hmmidmssn", "return", "returning", "homing", "dockroute", "dockroutecomplete", "dock"}:
+        if phase in {"hmmidmssn", "return", "returning", "homing", "dockroute", "dockroutecomplete", "hmusr", "hmusrdock"}:
             return "Roomba is returning to the dock"
         if phase == "stop":
-            if cycle == "clean":
-                return "Roomba is ready to clean"
+            if cycle not in {"", "none", "idle"}:
+                return "Roomba is paused"
             return "Roomba is idle"
-        if phase in {"charge", "chargecompleted", "recharge", "hmusrdock", "dockend"} and cycle in {"none", "idle", ""}:
+        if phase in {"charge", "chargecompleted", "recharge", "evac", "dock", "dockend"}:
             if bin_present is False:
                 return "Roomba is docked, but the bin is missing"
             mop_ready = bool(tank_present) and detected_pad not in {"", "nopad", "none", "unknown", "false", "0"}
@@ -485,47 +479,8 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         return "Roomba status is updating"
 
     def _normalize_vacuum_state_from_status(self, live_state: dict[str, Any], status: dict[str, Any], derived_state: str | None = None) -> str:
-        state = str(derived_state or self._derive_vacuum_state(live_state) or "idle").lower()
-        phase = str(status.get("mission_phase") or "").lower()
-        cycle = str(status.get("mission_cycle") or "").lower()
-        message = str(status.get("status_message") or "").lower()
-        dock_known = bool(status.get("dock_known"))
-        dock_contact = bool(status.get("dock_contact"))
-
-        idle_like_phase = {"stop", "idle", "ready", "startup_shadow_refresh", "charge", "chargecompleted", "dock", "dockend", "recharge", "hmusrdock", ""}
-        idle_like_cycle = {"none", "idle", ""}
-        docking_like_phase = {"charge", "chargecompleted", "dock", "dockend", "recharge", "hmusrdock"}
-        idle_like_message = any(token in message for token in {"idle", "ready"})
-        docked_like_message = any(token in message for token in {"docked", "charging", "at the dock", "at dock", "home"})
-
-        if self._is_definitely_docked(live_state):
-            return "docked"
-
-        # On this model the explicit dock flags are often absent after a successful
-        # return. When mission cycle has already collapsed to none/idle and the
-        # status message is idle-like, prefer the completed/home state over the
-        # stale transitional "returning" state.
-        if cycle in idle_like_cycle and phase in idle_like_phase:
-            if dock_contact or dock_known or docked_like_message:
-                return "docked"
-            if idle_like_message:
-                return "docked"
-
-        if "paused" in message:
-            return "paused"
-        if "cleaning" in message:
-            return "cleaning"
-        if "returning" in message or "returning to the dock" in message or "homing" in message:
-            return "returning"
-        if idle_like_message or docked_like_message:
-            if dock_contact or dock_known or docked_like_message or phase in docking_like_phase:
-                return "docked"
-            if cycle in idle_like_cycle and phase in idle_like_phase:
-                return "docked"
-            return "idle"
-        if "error" in message or "attention" in message:
-            return "error"
-        return state
+        """Derive activity from telemetry, never from human-readable messages."""
+        return self._derive_vacuum_state(live_state)
 
     def _build_live_status_block(self, live_state: dict[str, Any], previous_status: dict[str, Any] | None = None) -> dict[str, Any]:
         cms = live_state.get("cleanMissionStatus") if isinstance(live_state.get("cleanMissionStatus"), dict) else {}
@@ -649,30 +604,15 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         command_name: str | None = None,
         preserve_seconds: int = 8,
     ) -> None:
-        now = datetime.now(tz=UTC)
+        """Record a published command without fabricating robot telemetry."""
         base = dict(self.data or self._restored_data or {})
-        status = dict(base.get("status") or {})
-        if mission_phase is not None:
-            status["mission_phase"] = mission_phase
-        if command_name == "dock":
-            status["mission_cycle"] = status.get("mission_cycle") or "clean"
-        status["status_message"] = status_message
-        status["last_update"] = now.isoformat()
-        if status.get("battery") is None:
-            live_state = (base.get("live_state") if isinstance(base.get("live_state"), dict) else {})
-            if isinstance(live_state, dict):
-                status["battery"] = live_state.get("batPct")
-        base["status"] = status
-        base["vacuum_state"] = vacuum_state
-        if command_name:
-            base["_command_optimistic"] = {
-                "command": command_name,
-                "vacuum_state": vacuum_state,
-                "mission_phase": mission_phase,
-                "status_message": status_message,
-                "preserve_until": (now + timedelta(seconds=preserve_seconds)).isoformat(),
-                "issued_at": now.isoformat(),
-            }
+        base.pop("_command_optimistic", None)
+        base["last_command"] = {
+            "command": command_name,
+            "status": "published",
+            "requested_state": vacuum_state,
+            "issued_at": datetime.now(tz=UTC).isoformat(),
+        }
         self._restored_data = dict(base)
         await self.store.async_save(base)
         self.async_set_updated_data(base)
@@ -680,19 +620,22 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
     async def _write_debug_aliases(self) -> None:
         if not self.debug_enabled or self.debug_dir == self.legacy_debug_dir:
             return
-        try:
+        now = datetime.now(tz=UTC)
+        previous = getattr(self, "_last_debug_alias_at", None)
+        if previous and (now - previous).total_seconds() < 30:
+            return
+        self._last_debug_alias_at = now
+
+        def copy_aliases() -> None:
             self.debug_dir.mkdir(parents=True, exist_ok=True)
             self.legacy_debug_dir.mkdir(parents=True, exist_ok=True)
-            for src in self.debug_dir.glob("*"):
-                if src.is_file():
-                    dst = self.legacy_debug_dir / src.name
-                    try:
-                        dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
-                    except UnicodeDecodeError:
-                        dst.write_bytes(src.read_bytes())
+            for source in self.debug_dir.glob("*"):
+                if source.is_file():
+                    (self.legacy_debug_dir / source.name).write_bytes(source.read_bytes())
+        try:
+            await self.hass.async_add_executor_job(copy_aliases)
         except Exception as err:
             _LOGGER.debug("roomba_v4 debug alias write failed: %s", err)
-
 
     def _current_pose_source(self, live_state: dict[str, Any]) -> tuple[dict[str, Any], str] | tuple[None, None]:
         livemap = live_state.get("livemap") if isinstance(live_state.get("livemap"), dict) else {}
@@ -828,17 +771,14 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         cycle = str(cms.get("cycle") or (status or {}).get("mission_cycle") or "").lower()
         vacuum_state = str(vacuum_state or "").lower()
 
-        # Some 105 firmware/live topics do not consistently populate cycle/phase while the robot is moving.
-        # Be permissive here: record a synthetic trail whenever the robot is not definitely docked and the
-        # state looks active enough that position updates are meaningful.
-        if vacuum_state in {"docked", "charging", "idle", "ready", "unknown", "error"} and cycle in {"", "none", "idle"} and phase in {"", "charge", "chargecompleted", "stop", "dockend", "dock"}:
+        if vacuum_state != "cleaning":
             return livemap
 
         candidate = {
             "x": float(x),
             "y": float(y),
             "theta": pose.get("theta"),
-            "flag": "synthetic_pose",
+            "flag": (livemap.get("current") or {}).get("flag", "synthetic_pose"),
         }
         cumulative = livemap.get("cumulative_path_points") if isinstance(livemap.get("cumulative_path_points"), list) else []
         merged: list[dict[str, Any]] = []
@@ -856,12 +796,13 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
             dx = float(candidate["x"]) - float(last["x"])
             dy = float(candidate["y"]) - float(last["y"])
             dist = (dx * dx + dy * dy) ** 0.5
-            if dist < 0.02:
+            if dist < 0.08:
                 return livemap
             if dist > 1.75:
                 return livemap
 
         merged.append(candidate)
+        livemap["trail_format"] = 2
         livemap["cumulative_path_points"] = merged[-2500:]
         livemap["cumulative_path_points_count"] = len(livemap["cumulative_path_points"])
         self._last_path_pose = {"x": candidate["x"], "y": candidate["y"], "theta": candidate.get("theta")}
@@ -882,33 +823,50 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         base = dict(self.data or self._restored_data or {})
 
         prev_live_state = base.get("live_state") if isinstance(base.get("live_state"), dict) else {}
+        incoming_mission = (live_state.get("cleanMissionStatus") or {}).get("missionId")
+        old_mission = (prev_live_state.get("cleanMissionStatus") or {}).get("missionId")
+        if incoming_mission and old_mission and incoming_mission != old_mission:
+            prev_live_state = dict(prev_live_state)
+            prev_live_state.pop("pose", None)
+            prev_live_state.pop("livemap", None)
+            self._last_good_pose = None
+            self._last_path_pose = None
+            base["status"] = {key: value for key, value in (base.get("status") or {}).items() if key not in {"x", "y", "theta", "pose_source"}}
         live_state = self._merge_live_state(prev_live_state, live_state)
         prev_livemap = prev_live_state.get("livemap") if isinstance(prev_live_state.get("livemap"), dict) else {}
+        previous_mission = (prev_live_state.get("cleanMissionStatus") or {}).get("missionId")
+        current_mission = (live_state.get("cleanMissionStatus") or {}).get("missionId")
+        if current_mission and current_mission != previous_mission:
+            prev_livemap = {}
+            live_state.setdefault("livemap", {}).pop("cumulative_path_points", None)
+            self._last_path_pose = None
         cur_livemap = live_state.get("livemap") if isinstance(live_state.get("livemap"), dict) else None
         if cur_livemap is not None:
-            incoming = cur_livemap.get("path_points") if isinstance(cur_livemap.get("path_points"), list) else []
-            cumulative = prev_livemap.get("cumulative_path_points") if isinstance(prev_livemap.get("cumulative_path_points"), list) else []
-            merged = []
-            seen = set()
-            for pt in [*cumulative, *incoming]:
-                if not isinstance(pt, dict):
-                    continue
-                x = pt.get("x")
-                y = pt.get("y")
-                if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
-                    continue
-                key = (round(float(x), 4), round(float(y), 4))
-                if key in seen:
-                    continue
-                seen.add(key)
-                merged.append({
-                    "x": float(x),
-                    "y": float(y),
-                    "theta": pt.get("theta"),
-                    "flag": pt.get("flag"),
-                })
-            cur_livemap["cumulative_path_points"] = merged[-2000:]
-            cur_livemap["cumulative_path_points_count"] = len(merged)
+            # The API admits each mission-scoped batch once in timestamp/sequence order.
+            cumulative = (prev_livemap.get("cumulative_path_points") or []) if prev_livemap.get("trail_format") == 2 else []
+            incoming_points = cur_livemap.get("path_points") or []
+            if (live_state.get("_meta") or {}).get("source_kind") == "livemap" and self._derive_vacuum_state(live_state) == "cleaning":
+                cumulative = list(cumulative)
+                for point in incoming_points:
+                    if not isinstance(point, dict) or not all(isinstance(point.get(key), (int, float)) for key in ("x", "y")):
+                        continue
+                    if cumulative and all(abs(cumulative[-1][key] - point[key]) < 0.005 for key in ("x", "y")):
+                        continue
+                    cumulative.append(dict(point))
+            cur_livemap["trail_format"] = 2
+            cur_livemap["cumulative_path_points"] = list(cumulative[-2500:])
+            cur_livemap["cumulative_path_points_count"] = len(cumulative)
+            # Record return telemetry independently of camera refreshes and keep
+            # it separate from cleaning coverage. The renderer splits large gaps.
+            return_points = list(prev_livemap.get("return_path_points") or [])
+            if (live_state.get("_meta") or {}).get("source_kind") == "livemap" and self._derive_vacuum_state(live_state) == "returning":
+                for point in incoming_points:
+                    if not isinstance(point, dict) or not all(isinstance(point.get(key), (int, float)) for key in ("x", "y")):
+                        continue
+                    if return_points and ((return_points[-1]["x"] - point["x"]) ** 2 + (return_points[-1]["y"] - point["y"]) ** 2) ** 0.5 < 0.08:
+                        continue
+                    return_points.append(dict(point))
+            cur_livemap["return_path_points"] = return_points[-1200:]
             live_state["livemap"] = cur_livemap
 
         base["live_state"] = live_state
@@ -1111,6 +1069,16 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
             await self._write_debug_json("resolved_room_info.json", self.room_info)
 
             live_state = self.api.get_live_state_snapshot()
+            previous_live = (self.data or self._restored_data or {}).get("live_state") or {}
+            previous_mission = (previous_live.get("cleanMissionStatus") or {}).get("missionId")
+            current_mission = (live_state.get("cleanMissionStatus") or {}).get("missionId")
+            if previous_mission == current_mission:
+                history = (previous_live.get("livemap") or {}).get("cumulative_path_points")
+                if isinstance(history, list) and (previous_live.get("livemap") or {}).get("trail_format") == 2:
+                    live_state.setdefault("livemap", {})["trail_format"] = 2
+                    live_state["livemap"]["cumulative_path_points"] = list(history)
+                    live_state["livemap"]["cumulative_path_points_count"] = len(history)
+                    live_state["livemap"]["return_path_points"] = list((previous_live.get("livemap") or {}).get("return_path_points") or [])
             status_block = self._build_live_status_block(live_state)
             vacuum_state = self._normalize_vacuum_state_from_status(live_state, status_block)
             status_block["vacuum_state"] = vacuum_state
@@ -1813,6 +1781,8 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
                 "resolved_region_id": region_id,
             })
 
+        if any(not item.get("matched") or not item.get("region_candidates") for item in resolved):
+            raise CloudApiError(f"Unable to resolve every requested room: {normalized_ids}")
         if not regions:
             raise CloudApiError(f"No cleanable rooms resolved from ids: {normalized_ids}")
 
@@ -1836,18 +1806,31 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         })
         result = await self.api.publish_commanddef_via_cloud_mqtt(commanddef)
         await self._write_debug_json("send_command_app_segment_clean_result.json", result)
-        if self.data is not None:
-            self.data["vacuum_state"] = "cleaning"
         self.async_update_listeners()
         return result
+
+    async def async_clear_trails(self) -> None:
+        base = dict(self.data or self._restored_data or {})
+        live = dict(base.get("live_state") or {})
+        livemap = dict(live.get("livemap") or {})
+        livemap.update({"trail_format": 2, "cumulative_path_points": [], "cumulative_path_points_count": 0, "return_path_points": []})
+        live["livemap"] = livemap
+        base["live_state"] = live
+        self._last_path_pose = None
+        self._restored_data = dict(base)
+        await self.store.async_save(base)
+        self.async_set_updated_data(base)
 
     async def async_select_room(self, option: str) -> None:
         if option not in self.rooms:
             raise CloudApiError(f"Unknown room selection: {option}")
         self.selected_room = option
-        if self._restored_data is None:
-            self._restored_data = {}
-        self._restored_data["selected_room"] = option
+        base = dict(self.data or self._restored_data or {})
+        base["selected_room"] = option
+        self._restored_data = dict(base)
+        if isinstance(self.data, dict):
+            self.data["selected_room"] = option
+        await self.store.async_save(base)
         await self._write_debug_json("selected_room.json", {"selected_room": option, "rooms": self.rooms})
         self.async_update_listeners()
 
@@ -2140,8 +2123,6 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         })
         result = await self.api.publish_commanddef_via_cloud_mqtt(commanddef)
         await self._write_debug_json("routine_execute_clean_selected_room_result.json", result)
-        if self.data is not None:
-            self.data["vacuum_state"] = "cleaning"
         self.async_update_listeners()
         return result
 
@@ -2171,6 +2152,32 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
         if pmapv_id:
             commanddef["user_p2mapv_id"] = pmapv_id
         return commanddef
+
+    async def async_spot_clean(self, x: float, y: float) -> dict[str, Any]:
+        if not all(isinstance(v, (int, float)) and not isinstance(v, bool) and isfinite(v) for v in (x, y)):
+            raise CloudApiError("Spot target coordinates must be finite numbers in meters")
+        data = self.data or self._restored_data or {}
+        map_id, version = data.get("active_map_id"), data.get("active_map_version")
+        if not map_id or not version:
+            raise CloudApiError("A downloaded map and map version are required for Spot Clean")
+        commanddef = {
+            "robot_id": self.robot_blid,
+            "command": "point_clean",
+            "geom": {"center": [float(x), float(y)]},
+            "p2map_id": map_id,
+            "user_p2mapv_id": version,
+            "params": {"operatingMode": self._preferred_operating_mode_value() or 2},
+            "_preferred_payload_variant": "raw_commanddef_payload",
+        }
+        await self._write_debug_json("spot_clean_target_commanddef.json", commanddef)
+        return await self.api.publish_commanddef_via_cloud_mqtt(commanddef)
+
+    async def async_spot_clean_here(self) -> dict[str, Any]:
+        data = self.data or self._restored_data or {}
+        status = data.get("status") or {}
+        if data.get("vacuum_state") not in {"idle", "paused"} or telemetry_freshness(data)["position_stale"]:
+            raise CloudApiError("Choose a target with roomba_v4.spot_clean, or pause the robot at the spot before using Spot Clean Here")
+        return await self.async_spot_clean(status.get("x"), status.get("y"))
 
     async def async_start_clean_all(self) -> dict[str, Any]:
         result = await self.async_execute_named_routine("clean_all")
@@ -2205,8 +2212,7 @@ class RoombaV4Coordinator(DataUpdateCoordinator[dict]):
             commanddef = self._build_clean_all_commanddef()
             debug_prefix = "clean_all"
         elif routine_key == "spot_clean":
-            commanddef = self._find_routine_commanddef(name_loc_key="digital_spot_clean", routine_type="SPOT_CLEAN", friendly_name="Spot Clean")
-            debug_prefix = "spot_clean"
+            return await self.async_spot_clean_here()
         else:
             raise CloudApiError(f"Unknown routine key: {routine_key}")
 

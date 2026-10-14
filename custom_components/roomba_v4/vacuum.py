@@ -8,12 +8,16 @@ from homeassistant.helpers.icon import icon_for_battery_level
 from . import RoombaV4ConfigEntry
 from .const import DOMAIN
 from .entity import RoombaV4Entity
+from .freshness import telemetry_freshness
 
 
 def _status_is_charging(status: dict | None) -> bool:
     status = status or {}
     vacuum_state = str(status.get("vacuum_state") or "").lower()
     mission_phase = str(status.get("mission_phase") or "").lower()
+    # Current mission activity overrides a dock-contact value retained in a delta.
+    if vacuum_state in {"cleaning", "paused", "returning", "idle"}:
+        return False
     return bool(
         status.get("dock_contact") is True
         or vacuum_state in {"charging"}
@@ -76,6 +80,11 @@ class RoombaV4Vacuum(RoombaV4Entity, StateVacuumEntity):
     async def async_send_command(self, command, params=None, **kwargs) -> None:
         cmd = str(command or "").strip().lower()
         payload = params
+        if cmd in {"spot_clean", "point_clean"}:
+            if not isinstance(payload, dict) or "x" not in payload or "y" not in payload:
+                raise ValueError("Spot Clean requires params with x and y map coordinates in meters")
+            await self.coordinator.async_spot_clean(payload["x"], payload["y"])
+            return
         if cmd == "app_segment_clean":
             if payload is None:
                 raise ValueError("app_segment_clean requires params")
@@ -102,6 +111,7 @@ class RoombaV4Vacuum(RoombaV4Entity, StateVacuumEntity):
         ]
         status = data.get("status") or {}
         return {
+            **telemetry_freshness(data),
             "robot_name": robot.get("robotName") or robot.get("name"),
             "sku": robot.get("sku"),
             "firmware": robot.get("softwareVer") or robot.get("firmware") or robot.get("robot_version"),
@@ -136,6 +146,8 @@ class RoombaV4Vacuum(RoombaV4Entity, StateVacuumEntity):
             "bin_full": status.get("bin_full"),
             "last_topic": status.get("last_topic"),
             "last_update": status.get("last_update"),
+            "robot_reported_at": ((data.get("live_state") or {}).get("_meta") or {}).get("robot_reported_at"),
+            "last_command": data.get("last_command"),
             "charging": _status_is_charging(status),
             "battery_icon": icon_for_battery_level(
                 battery_level=status.get("battery"),

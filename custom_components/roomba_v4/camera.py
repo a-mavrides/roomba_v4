@@ -14,13 +14,14 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from . import RoombaV4ConfigEntry
 from .const import DOMAIN
 from .entity import RoombaV4Entity
+from .freshness import telemetry_freshness
 
 
 # Static robot/map alignment trim in meters.
 # Applied only at the final display/attribute stage so internal path logic
 # continues to use the original stable coordinate space.
-DISPLAY_OFFSET_X = -0.03
-DISPLAY_OFFSET_Y = 0.02
+DISPLAY_OFFSET_X = 0.0
+DISPLAY_OFFSET_Y = 0.0
 
 
 def _apply_display_offset(point: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -72,58 +73,93 @@ def _vacuum_to_image_xy(x: float | int | None, y: float | int | None, meta: dict
     return (px, py)
 
 
-def _draw_overlay_png(base_png: bytes | None, meta: dict[str, Any], vacuum_position: dict[str, Any] | None, path_points: list[dict[str, Any]], return_path_points: list[dict[str, Any]] | None = None) -> bytes | None:
+def _simplify_route(points: list[dict[str, Any]], tolerance: float = 0.04) -> list[dict[str, Any]]:
+    """Remove sub-centimetre detail without rounding real corners or closing loops."""
+    if len(points) < 3:
+        return list(points)
+    first, last = points[0], points[-1]
+    dx, dy = last["x"] - first["x"], last["y"] - first["y"]
+    length2 = dx * dx + dy * dy
+    best, index = 0.0, 0
+    for i, point in enumerate(points[1:-1], 1):
+        t = max(0.0, min(1.0, ((point["x"] - first["x"]) * dx + (point["y"] - first["y"]) * dy) / length2)) if length2 else 0.0
+        distance = ((point["x"] - first["x"] - t * dx) ** 2 + (point["y"] - first["y"] - t * dy) ** 2) ** 0.5
+        if distance > best:
+            best, index = distance, i
+    if best <= tolerance:
+        return [first, last]
+    return _simplify_route(points[:index + 1], tolerance)[:-1] + _simplify_route(points[index:], tolerance)
+
+
+def _draw_overlay_png(base_png: bytes | None, meta: dict[str, Any], vacuum_position: dict[str, Any] | None, path_points: list[dict[str, Any]], return_path_points: list[dict[str, Any]] | None = None, transit_path_points: list[dict[str, Any]] | None = None) -> bytes | None:
     if not base_png:
         return base_png
     try:
-        img = Image.open(io.BytesIO(base_png)).convert("RGBA")
+        base = Image.open(io.BytesIO(base_png)).convert("RGBA")
     except Exception:
         return base_png
+    scale = 3
+    overlay = Image.new("RGBA", (base.width * scale, base.height * scale))
+    draw = ImageDraw.Draw(overlay)
 
-    draw = ImageDraw.Draw(img, "RGBA")
-
-    # cleaned path / recent route
-    poly = []
-    for pt in path_points or []:
-        if not isinstance(pt, dict):
-            continue
-        pix = _vacuum_to_image_xy(pt.get("x"), pt.get("y"), meta)
-        if pix:
-            poly.append(pix)
-    if len(poly) >= 2:
-        draw.line(poly, fill=(0, 120, 255, 235), width=7)
-        for px, py in poly[-400:]:
-            draw.ellipse((px-3, py-3, px+3, py+3), fill=(0, 120, 255, 215))
-
-    # return-to-dock guide / predicted route
-    return_poly = []
-    for pt in return_path_points or []:
-        if not isinstance(pt, dict):
-            continue
-        pix = _vacuum_to_image_xy(pt.get("x"), pt.get("y"), meta)
-        if pix:
-            return_poly.append(pix)
-    if len(return_poly) >= 2:
-        draw.line(return_poly, fill=(249, 115, 22, 220), width=5)
-
-    # robot body + heading
+    def route(points, color, dashed=False):
+        # Never bridge a missing pose interval with an invented straight line.
+        segments, segment = [], []
+        previous = None
+        for point in points or []:
+            if previous and (_distance_between_points(previous, point) or 0) > 1.75:
+                if segment: segments.append(segment)
+                segment = []
+            segment.append(point)
+            previous = point
+        if segment: segments.append(segment)
+        for part in segments:
+            pixels = [_vacuum_to_image_xy(pt.get("x"), pt.get("y"), meta) for pt in _simplify_route(part)]
+            pixels = [(x * scale, y * scale) for x, y in pixels if x is not None] if all(pixels) else []
+            if len(pixels) < 2: continue
+            if not dashed:
+                draw.line(pixels, fill=(34, 197, 94, 55), width=20 * scale, joint="curve")
+                draw.line(pixels, fill=color, width=3 * scale, joint="curve")
+                for x, y in pixels:
+                    draw.ellipse((x-2*scale, y-2*scale, x+2*scale, y+2*scale), fill=color)
+            else:
+                offset = 0.0
+                for start, end in zip(pixels, pixels[1:]):
+                    dx, dy = end[0]-start[0], end[1]-start[1]
+                    length = (dx*dx+dy*dy)**0.5
+                    travelled = 0.0
+                    while travelled < length:
+                        remaining = (6 if offset < 6 else 10) * scale - offset * scale
+                        step = min(remaining, length-travelled)
+                        if offset < 6 and length:
+                            a = (start[0]+dx*travelled/length, start[1]+dy*travelled/length)
+                            b = (start[0]+dx*(travelled+step)/length, start[1]+dy*(travelled+step)/length)
+                            draw.line([a,b], fill=(255,255,255,220), width=6*scale)
+                            draw.line([a,b], fill=color, width=3*scale)
+                        travelled += step
+                        offset = (offset + step / scale) % 10
+                        if step < 1e-6: break
+    route(transit_path_points, (100, 116, 139, 135), True)
+    route(path_points, (22, 101, 52, 235))
+    route(return_path_points, (217, 119, 6, 255), True)
     if isinstance(vacuum_position, dict):
-        pix = _vacuum_to_image_xy(vacuum_position.get("x"), vacuum_position.get("y"), meta)
-        if pix:
-            cx, cy = pix
-            r = 10
-            draw.ellipse((cx-r, cy-r, cx+r, cy+r), fill=(220, 38, 38, 235), outline=(255,255,255,255), width=2)
+        pixel = _vacuum_to_image_xy(vacuum_position.get("x"), vacuum_position.get("y"), meta)
+        if pixel:
+            cx, cy = pixel[0]*scale, pixel[1]*scale
+            r = 11 * scale
+            draw.ellipse((cx-r-2*scale,cy-r-2*scale,cx+r+2*scale,cy+r+2*scale),fill=(255,255,255,235))
+            draw.ellipse((cx-r,cy-r,cx+r,cy+r),fill=(30,41,59,255))
             angle = vacuum_position.get("angle")
-            if isinstance(angle, (int, float)):
-                # 0 deg = east in map coords; invert Y for image coords
+            if isinstance(angle,(int,float)):
                 a = radians(float(angle))
-                tip = (cx + cos(a) * 18, cy - sin(a) * 18)
-                left = (cx + cos(a + 2.45) * 9, cy - sin(a + 2.45) * 9)
-                right = (cx + cos(a - 2.45) * 9, cy - sin(a - 2.45) * 9)
-                draw.polygon([tip, left, right], fill=(255,255,255,240))
-
+                tip = (cx+cos(a)*5*scale,cy-sin(a)*5*scale)
+                left = (cx+cos(a+2.4)*3*scale,cy-sin(a+2.4)*3*scale)
+                right = (cx+cos(a-2.4)*3*scale,cy-sin(a-2.4)*3*scale)
+                draw.polygon([tip,left,right],fill=(255,255,255,255))
+    overlay = overlay.resize(base.size, Image.Resampling.LANCZOS)
+    base = Image.alpha_composite(base, overlay)
     out = io.BytesIO()
-    img.save(out, format="PNG")
+    base.save(out, format="PNG")
     return out.getvalue()
 
 
@@ -156,7 +192,7 @@ def _mission_phase_lower(status: dict[str, Any] | None) -> str:
 
 
 def _is_returning_phase(phase: str) -> bool:
-    return phase in {"hmmidmssn", "return", "returning", "homing", "dockroute", "dockroutecomplete", "hmusrdock"}
+    return phase in {"hmmidmssn", "return", "returning", "homing", "dockroute", "dockroutecomplete", "hmusr", "hmusrdock"}
 
 
 def _is_returning_state(vacuum_state: str, phase: str) -> bool:
@@ -506,6 +542,8 @@ class RoombaV4MapCamera(RoombaV4Entity, Camera):
         self._return_path_points: list[dict[str, Any]] = []
         self._recent_return_pose_candidates: list[dict[str, Any]] = []
         self._was_returning: bool = False
+        self._cleaning_trail: list[dict[str, Any]] = []
+        self._trail_mission_id: str | None = None
 
 
     def _clear_local_path(self) -> None:
@@ -517,13 +555,17 @@ class RoombaV4MapCamera(RoombaV4Entity, Camera):
         self._recent_return_pose_candidates = []
 
     async def async_clear_path_history(self) -> None:
+        await self.coordinator.async_clear_trails()
         self._clear_local_path()
         self._clear_return_path()
+        self._cleaning_trail = []
         self.async_write_ha_state()
 
     def _is_effectively_docked(self, status: dict[str, Any], vacuum_position: dict[str, Any] | None, charger_position: dict[str, Any] | None) -> bool:
         vacuum_state = _vacuum_state_lower(self.coordinator.data or {}, status)
         phase = _mission_phase_lower(status)
+        if vacuum_state in {"cleaning", "paused", "returning"}:
+            return False
         if vacuum_state in {"docked", "charging"} or phase in {"charge", "chargecompleted", "dockend", "dock"} or status.get("dock_contact") is True:
             return True
         if isinstance(vacuum_position, dict) and isinstance(charger_position, dict):
@@ -545,7 +587,7 @@ class RoombaV4MapCamera(RoombaV4Entity, Camera):
             self._recent_pose_candidates = []
             return list(self._local_path_points)
 
-        if _is_paused_state(vacuum_state, phase):
+        if vacuum_state != "cleaning":
             self._recent_pose_candidates = []
             return list(self._local_path_points)
 
@@ -555,6 +597,8 @@ class RoombaV4MapCamera(RoombaV4Entity, Camera):
             **({"theta": vacuum_position.get("theta")} if vacuum_position.get("theta") is not None else {}),
             "flag": "camera_local_pose_raw",
         }
+        if self._recent_pose_candidates and _distance_between_points(self._recent_pose_candidates[-1], raw_candidate) == 0:
+            return list(self._local_path_points)
         self._recent_pose_candidates.append(raw_candidate)
         self._recent_pose_candidates = self._recent_pose_candidates[-5:]
 
@@ -680,17 +724,18 @@ class RoombaV4MapCamera(RoombaV4Entity, Camera):
         vacuum_state = _vacuum_state_lower(self.coordinator.data or {}, status)
         phase = _mission_phase_lower(status)
         returning = _is_returning_state(vacuum_state, phase)
+        livemap = ((self.coordinator.data or {}).get("live_state") or {}).get("livemap") or {}
+        if "return_path_points" in livemap:
+            self._return_path_points = _filter_path_points(livemap.get("return_path_points") or [])
+            return list(self._return_path_points)
 
         if self._is_effectively_docked(status, raw_live_vacuum_position, charger_position):
-            if self._was_returning:
-                self._clear_local_path()
-                self._clear_return_path()
+            self._recent_return_pose_candidates = []
             self._was_returning = False
-            return []
+            return list(self._return_path_points)
 
         if not returning or not isinstance(charger_position, dict):
-            if not self._was_returning:
-                self._clear_return_path()
+            self._recent_return_pose_candidates = []
             self._was_returning = False
             return list(self._return_path_points) if self._return_path_points else []
 
@@ -704,6 +749,8 @@ class RoombaV4MapCamera(RoombaV4Entity, Camera):
             **({"theta": raw_live_vacuum_position.get("theta")} if raw_live_vacuum_position.get("theta") is not None else {}),
             "flag": "return_pose_raw",
         }
+        if self._recent_return_pose_candidates and _distance_between_points(self._recent_return_pose_candidates[-1], raw_candidate) == 0:
+            return list(self._return_path_points)
         self._recent_return_pose_candidates.append(raw_candidate)
         self._recent_return_pose_candidates = self._recent_return_pose_candidates[-5:]
 
@@ -730,29 +777,23 @@ class RoombaV4MapCamera(RoombaV4Entity, Camera):
                     "flag": "return_start",
                 })
 
+        if len(self._return_path_points) > 1 and isinstance(charger_position, dict):
+            end_distance = _distance_between_points(self._return_path_points[-1], charger_position)
+            if end_distance is not None and end_distance < 0.25:
+                return list(self._return_path_points)
         existing = self._return_path_points[-1] if self._return_path_points else None
         if isinstance(existing, dict):
             distance = _distance_between_points(existing, candidate)
             if distance is not None:
-                if distance < 0.01:
+                if distance < 0.08:
                     return list(self._return_path_points)
-                if distance > 0.60:
+                if distance > 1.75:
                     return list(self._return_path_points)
                 if len(self._return_path_points) >= 2:
                     prev = self._return_path_points[-2]
                     prev_distance = _distance_between_points(prev, candidate)
                     if prev_distance is not None and prev_distance < 0.05 and distance > 0.25:
                         return list(self._return_path_points)
-
-            # Reject points that suddenly move away from the dock while already returning.
-            existing_dock_distance = _distance_between_points(existing, charger_position)
-            candidate_dock_distance = _distance_between_points(candidate, charger_position)
-            if (
-                existing_dock_distance is not None
-                and candidate_dock_distance is not None
-                and candidate_dock_distance > existing_dock_distance + 0.20
-            ):
-                return list(self._return_path_points)
 
         self._return_path_points.append(candidate)
         self._return_path_points = self._return_path_points[-1200:]
@@ -787,13 +828,27 @@ class RoombaV4MapCamera(RoombaV4Entity, Camera):
         charger_position = None
         if charger and charger.get("x") is not None and charger.get("y") is not None:
             charger_position = {"x": float(charger.get("x")), "y": float(charger.get("y")), "a": charger.get("angle") if charger.get("angle") is not None else charger.get("a")}
-        raw_path_points = livemap.get("cumulative_path_points") if isinstance(livemap.get("cumulative_path_points"), list) else (livemap.get("path_points") if isinstance(livemap.get("path_points"), list) else [])
+        mission_id = (live_state.get("cleanMissionStatus") or {}).get("missionId")
+        if mission_id and mission_id != self._trail_mission_id and _vacuum_state_lower(data, status) == "cleaning":
+            self._trail_mission_id = mission_id
+            self._cleaning_trail = []
+            self._clear_local_path()
+            self._clear_return_path()
+        raw_path_points = livemap.get("cumulative_path_points") if livemap.get("trail_format") == 2 and isinstance(livemap.get("cumulative_path_points"), list) else []
         local_path_points = self._update_local_path(status, vacuum_position, charger_position)
-        path_points = _filter_path_points([*(raw_path_points or []), *local_path_points], vacuum_position)
+        mission_id = (live_state.get("cleanMissionStatus") or {}).get("missionId")
+        if mission_id and mission_id != self._trail_mission_id and _vacuum_state_lower(data, status) == "cleaning":
+            self._trail_mission_id = mission_id
+            self._cleaning_trail = []
+            self._clear_return_path()
+        if _vacuum_state_lower(data, status) == "cleaning" or not self._cleaning_trail:
+            self._cleaning_trail = _filter_path_points(raw_path_points or local_path_points)
+        path_points = [point for point in self._cleaning_trail if point.get("flag") != 0]
         return_path_points = self._update_return_path(status, raw_live_vacuum_position, charger_position, path_points)
         display_vacuum_position, _display_position_mode = self._display_vacuum_position(status, vacuum_position, charger_position, path_points)
         draw_path_points = _apply_display_offset_to_points(path_points)
         draw_return_path_points = _apply_display_offset_to_points(return_path_points)
+        draw_transit_path_points = _apply_display_offset_to_points([point for point in self._cleaning_trail if point.get("flag") == 0])
         draw_vacuum_position = _apply_display_offset(display_vacuum_position)
         phase = _mission_phase_lower(status)
         vacuum_state = _vacuum_state_lower(data, status)
@@ -801,7 +856,7 @@ class RoombaV4MapCamera(RoombaV4Entity, Camera):
             if display_vacuum_position is not None:
                 self._last_active_vacuum_position = dict(display_vacuum_position)
         return await self.coordinator.hass.async_add_executor_job(
-            _draw_overlay_png, self.coordinator.map_png_bytes, meta, draw_vacuum_position, draw_path_points, draw_return_path_points
+            _draw_overlay_png, self.coordinator.map_png_bytes, meta, draw_vacuum_position, draw_path_points, draw_return_path_points, draw_transit_path_points
         )
 
     @property
@@ -824,9 +879,22 @@ class RoombaV4MapCamera(RoombaV4Entity, Camera):
         charger_position = None
         if charger and charger.get("x") is not None and charger.get("y") is not None:
             charger_position = {"x": float(charger.get("x")), "y": float(charger.get("y")), "a": charger.get("angle") if charger.get("angle") is not None else charger.get("a")}
-        raw_path_points = livemap.get("cumulative_path_points") if isinstance(livemap.get("cumulative_path_points"), list) else (livemap.get("path_points") if isinstance(livemap.get("path_points"), list) else [])
+        mission_id = (live_state.get("cleanMissionStatus") or {}).get("missionId")
+        if mission_id and mission_id != self._trail_mission_id and _vacuum_state_lower(data, status) == "cleaning":
+            self._trail_mission_id = mission_id
+            self._cleaning_trail = []
+            self._clear_local_path()
+            self._clear_return_path()
+        raw_path_points = livemap.get("cumulative_path_points") if livemap.get("trail_format") == 2 and isinstance(livemap.get("cumulative_path_points"), list) else []
         local_path_points = self._update_local_path(status, vacuum_position, charger_position)
-        path_points = _filter_path_points([*(raw_path_points or []), *local_path_points], vacuum_position)
+        mission_id = (live_state.get("cleanMissionStatus") or {}).get("missionId")
+        if mission_id and mission_id != self._trail_mission_id and _vacuum_state_lower(data, status) == "cleaning":
+            self._trail_mission_id = mission_id
+            self._cleaning_trail = []
+            self._clear_return_path()
+        if _vacuum_state_lower(data, status) == "cleaning" or not self._cleaning_trail:
+            self._cleaning_trail = _filter_path_points(raw_path_points or local_path_points)
+        path_points = [point for point in self._cleaning_trail if point.get("flag") != 0]
         return_path_points = self._update_return_path(status, raw_live_vacuum_position, charger_position, path_points)
         display_vacuum_position, display_position_mode = self._display_vacuum_position(status, vacuum_position, charger_position, path_points)
         display_path_points = _apply_display_offset_to_points(path_points)
@@ -904,6 +972,7 @@ class RoombaV4MapCamera(RoombaV4Entity, Camera):
         attrs["display_position_mode"] = display_position_mode
         attrs["debug_vacuum_state"] = vacuum_state
         attrs["debug_mission_phase"] = phase
+        attrs.update(telemetry_freshness(data))
         attrs["display_offset"] = {"x": DISPLAY_OFFSET_X, "y": DISPLAY_OFFSET_Y}
         attrs["return_path_points_count"] = len(display_return_path_points)
         if display_return_path_points:

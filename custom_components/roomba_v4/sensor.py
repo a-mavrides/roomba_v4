@@ -9,12 +9,16 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from . import RoombaV4ConfigEntry
 from .const import DOMAIN
 from .entity import RoombaV4Entity
+from .freshness import telemetry_freshness
 
 
 def _status_is_charging(status: dict | None) -> bool:
     status = status or {}
     vacuum_state = str(status.get("vacuum_state") or "").lower()
     mission_phase = str(status.get("mission_phase") or "").lower()
+    # Current mission activity overrides a dock-contact value retained in a delta.
+    if vacuum_state in {"cleaning", "paused", "returning", "idle"}:
+        return False
     return bool(
         status.get("dock_contact") is True
         or vacuum_state in {"charging"}
@@ -146,6 +150,7 @@ class StatusMessageSensor(_StatusSensor):
         live_state = (self.coordinator.data or {}).get("live_state") or {}
         livemap = live_state.get("livemap") if isinstance(live_state.get("livemap"), dict) else {}
         return {
+            **telemetry_freshness(self.coordinator.data or {}),
             "tank_present": status.get("tank_present"),
             "detected_pad": status.get("detected_pad"),
             "mission_phase": status.get("mission_phase"),

@@ -1,0 +1,17 @@
+# Add this mode to the map_modes list of Xiaomi Vacuum Map Card v2.4.1+.
+# The Roomba camera's calibration coordinates use millimeters.
+# Keep your existing Rooms mode alongside it.
+- name: Spot Clean
+  icon: mdi:target
+  selection_type: MANUAL_POINT
+  coordinates_rounding: true
+  max_selections: 1
+  run_immediately: false
+  repeats_type: NONE
+  service_call_schema:
+    service: roomba_v4.spot_clean
+    evaluate_data_as_template: true
+    service_data:
+      # For multiple Roomba entries, also specify entry_id for this card's robot.
+      x: "{{ [[point_x]] / 1000 }}"
+      y: "{{ [[point_y]] / 1000 }}"

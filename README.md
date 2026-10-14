@@ -123,6 +123,37 @@ If you encounter any problems, please open an issue:
 
 ---
 
+## Spot Clean from the map
+
+With Xiaomi Vacuum Map Card v2.4.1+, add the mode in
+[examples/lovelace-spot-clean.yaml](examples/lovelace-spot-clean.yaml) to the
+card's `map_modes` list alongside your Rooms mode. Use this integration's
+camera calibration; its coordinates are in millimeters and the example converts
+them to meters for `roomba_v4.spot_clean`.
+
+Choose **Spot Clean** in the selector below the map, tap the desired point,
+then press the blue Clean/play button to the right of the selector. Selecting a
+point does not start the robot. If you have multiple Roomba integrations, add
+the target robot's `entry_id` to the mode's `service_data`.
+
+## Current limitations
+
+Manual map/floor selection is not currently supported. Room selection uses the
+currently active map. J7+ map downloads remain unverified.
+
+## Version 4.0.3
+
+- Fix live mission updates, MQTT acknowledgements and dynamic robot deployment topics.
+- Preserve routes across restarts and separate cleaning and return trails.
+- Improve map rendering and retain the vendor's wall geometry.
+- Add targeted Spot Clean and the map-card configuration example above.
+- Expose telemetry freshness and validate room selections before sending commands.
+
+Verified on Roomba 105, including phone-started automation, restart during a run,
+and a Spot Clean cycle through automatic return and docking. Other robot models
+require confirmation. Back up Home Assistant before updating, then restart it
+after replacing the integration files.
+
 ## 📄 License
 
 This project is licensed under the MIT License.

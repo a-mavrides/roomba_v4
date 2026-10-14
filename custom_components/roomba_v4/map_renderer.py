@@ -892,11 +892,6 @@ def render_archive_to_png_bytes(
                         line_width=1,
                     )
 
-        room_x_clusters, room_y_clusters = _collect_room_axis_clusters(
-            rooms,
-            tolerance=0.25,
-        )
-
         palette = [
             (238, 242, 255, 242),
             (236, 254, 255, 242),
@@ -911,11 +906,9 @@ def render_archive_to_png_bytes(
             for idx, feat in enumerate(_features(rooms), start=1):
                 geom = _effective_geometry(feat) or {}
                 if geom.get("type") == "Polygon":
-                    rings = _clean_room_rings(
-                        geom.get("coordinates", []),
-                        x_clusters=room_x_clusters,
-                        y_clusters=room_y_clusters,
-                    )
+                    # Vendor geometry already contains its simplified wall coordinates.
+                    # Further snapping changes clearance between walls and live poses.
+                    rings = geom.get("coordinates", [])
                     draw_polygon(
                         rings,
                         fill=palette[(idx - 1) % len(palette)],

@@ -66,6 +66,7 @@ class RoombaV4ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )
             try:
                 await api.authenticate()
+                self._user_input = {**user_input, "cloud_client_config": dict(api.config)}
                 self._robots = api.robots
                 if not self._robots:
                     errors["base"] = "no_robots"

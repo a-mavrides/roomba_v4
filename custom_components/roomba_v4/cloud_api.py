@@ -1078,14 +1078,18 @@ class IRobotCloudApi:
         start += 2
         topic = data[start:start+topic_len].decode("utf-8", errors="replace")
         start += topic_len
+        packet_id = None
         if qos:
+            if start + 2 > len(data):
+                raise ValueError("Truncated MQTT PUBLISH packet identifier")
+            packet_id = int.from_bytes(data[start:start + 2], "big")
             start += 2
         payload = data[start:]
         try:
             payload_text = payload.decode("utf-8")
         except Exception:
             payload_text = None
-        decoded = {"type": 3, "raw_hex": data.hex(), "raw_len": len(data), "topic": topic, "payload_text": payload_text}
+        decoded = {"type": 3, "raw_hex": data.hex(), "raw_len": len(data), "topic": topic, "payload_text": payload_text, "qos": qos, "packet_id": packet_id}
         if payload_text:
             try:
                 decoded["payload_json"] = json.loads(payload_text)
@@ -1103,7 +1107,13 @@ class IRobotCloudApi:
             return {"type": "empty", "raw_hex": ""}
         packet_type = data[0] >> 4
         if packet_type == 3:
-            return self._mqtt_decode_publish(data)
+            packet = self._mqtt_decode_publish(data)
+            # Acknowledge transport delivery even for a duplicate or older shadow.
+            # Otherwise AWS retries it and can hold newer messages behind it.
+            if packet.get("qos") == 1 and packet.get("packet_id"):
+                async with self._subscriber_send_lock:
+                    await websocket.send(b"\x40\x02" + packet["packet_id"].to_bytes(2, "big"))
+            return packet
         result = {
             "type": packet_type,
             "raw_hex": data.hex(),
@@ -1382,7 +1392,7 @@ class IRobotCloudApi:
             return {
                 k: v
                 for k, v in fragment.items()
-                if k in {"cleanMissionStatus", "pose", "dock", "batPct", "signal", "bin"}
+                if k in {"livemap", "cleanMissionStatus", "pose", "dock", "batPct", "signal", "bin"}
             }
         if mode == "shadow":
             if isinstance(self._live_state.get("cleanMissionStatus"), dict):
@@ -1612,9 +1622,18 @@ class IRobotCloudApi:
             "initiator": "localApp",
         }
         if isinstance(params, dict):
-            payload_obj.update(params)
+            if command_lower == "point_clean":
+                # The phone's accepted point command keeps parameters nested.
+                payload_obj["params"] = params_dict
+            else:
+                payload_obj.update(params)
         if p2map_id:
             payload_obj["p2map_id"] = p2map_id
+        if command_lower == "point_clean":
+            if isinstance(commanddef.get("geom"), dict):
+                payload_obj["geom"] = commanddef["geom"]
+            if pmapv_id:
+                payload_obj["user_p2mapv_id"] = pmapv_id
         if isinstance(regions, list) and regions:
             payload_obj["regions"] = regions
         if "select_all" in commanddef:
@@ -1707,10 +1726,14 @@ class IRobotCloudApi:
 
     def _compose_effective_live_state(self) -> dict[str, Any]:
         state: dict[str, Any] = {}
-        merge_order = ["shadow", "currentstate_get", "currentstate_update", "livemap"]
+        versions = getattr(self, "_currentstate_source_versions", {})
+        current_sources = sorted(("currentstate_get", "currentstate_update"), key=lambda name: versions.get(name, -1))
+        merge_order = ["shadow", *current_sources, "livemap"]
         for name in merge_order:
             fragment = self._live_state_sources.get(name) or {}
             if isinstance(fragment, dict) and fragment:
+                if name == "livemap" and (self._live_state_sources.get("currentstate_get") or self._live_state_sources.get("currentstate_update")):
+                    fragment = {key: value for key, value in fragment.items() if key in {"pose", "livemap"}}
                 self._deep_merge_dict(state, fragment)
         stats = self._live_state_sources.get("stats") or {}
         if isinstance(stats, dict):
@@ -1738,47 +1761,23 @@ class IRobotCloudApi:
         return base
 
     def _extract_shadow_state_fragments(self, payload: Any) -> list[tuple[str, dict[str, Any]]]:
-        out: list[tuple[str, dict[str, Any]]] = []
-
-        def add(label: str, value: Any) -> None:
-            if isinstance(value, dict) and value:
-                out.append((label, value))
-
+        """Extract current reported values without replaying previous or desired state."""
         if not isinstance(payload, dict):
-            return out
-
-        state = payload.get("state")
-        if isinstance(state, dict):
-            add("state", state)
-            add("state.reported", state.get("reported"))
-            add("state.desired", state.get("desired"))
-
+            return []
         current = payload.get("current")
-        if isinstance(current, dict):
-            add("current", current)
-            current_state = current.get("state")
-            if isinstance(current_state, dict):
-                add("current.state", current_state)
-                add("current.state.reported", current_state.get("reported"))
-                add("current.state.desired", current_state.get("desired"))
-
-        previous = payload.get("previous")
-        if isinstance(previous, dict):
-            prev_state = previous.get("state")
-            if isinstance(prev_state, dict):
-                add("previous.state", prev_state)
-                add("previous.state.reported", prev_state.get("reported"))
-                add("previous.state.desired", prev_state.get("desired"))
-
-        metadata = payload.get("metadata")
-        if isinstance(metadata, dict):
-            add("metadata", metadata)
-
-        top_level_reported = payload.get("reported")
-        if isinstance(top_level_reported, dict):
-            add("reported", top_level_reported)
-
-        return out
+        source = current if isinstance(current, dict) else payload
+        state = source.get("state")
+        if isinstance(state, dict):
+            reported = state.get("reported")
+            if isinstance(reported, dict):
+                return [("state.reported", reported)] if reported else []
+            if "desired" in state:
+                return []
+            return [("state", state)] if state else []
+        reported = source.get("reported")
+        if isinstance(reported, dict):
+            return [("reported", reported)] if reported else []
+        return []
 
     def _derive_live_state_summary(self, state: dict[str, Any]) -> dict[str, Any]:
         cms = state.get("cleanMissionStatus") if isinstance(state.get("cleanMissionStatus"), dict) else {}
@@ -1842,10 +1841,36 @@ class IRobotCloudApi:
             self._live_state.setdefault("_debug", {})["last_software_payload"] = payload if isinstance(payload, dict) else {"value": str(payload)}
             return
 
+        # GET and update documents can arrive out of order on the same shadow.
+        # Never let an older mission reset the current mission's pose history.
+        if mode == "currentstate" and isinstance(payload, dict):
+            current_document = payload.get("current")
+            document = current_document if isinstance(current_document, dict) else payload
+            version = document.get("version")
+            if isinstance(version, int):
+                previous_version = getattr(self, "_currentstate_version", -1)
+                if version < previous_version:
+                    return
+                self._currentstate_version = version
+                if not hasattr(self, "_currentstate_source_versions"):
+                    self._currentstate_source_versions = {}
+                self._currentstate_source_versions[source_kind] = version
         fragments = self._extract_shadow_state_fragments(payload)
         livemap_fragment: dict[str, Any] = {}
         if mode == "livemap":
             livemap_fragment = self._extract_livemap_fragment(payload)
+            parsed_map = livemap_fragment.get("livemap") or {}
+            sample_time = parsed_map.get("path_timestamp") or parsed_map.get("timestamp")
+            sequence = parsed_map.get("path_header")
+            if isinstance(sample_time, (int, float)):
+                mission_start = (self._live_state.get("cleanMissionStatus") or {}).get("mssnStrtTm")
+                if isinstance(mission_start, (int, float)) and sample_time < mission_start:
+                    return
+                sample_key = (sample_time, sequence if isinstance(sequence, (int, float)) else -1)
+                previous_key = getattr(self, "_last_livemap_sample_key", None)
+                if previous_key is not None and sample_key <= previous_key:
+                    return
+                self._last_livemap_sample_key = sample_key
             if livemap_fragment and not fragments:
                 fragments = [("livemap", livemap_fragment)]
         if not fragments:
@@ -1863,6 +1888,13 @@ class IRobotCloudApi:
             filtered = self._filter_fragment_for_topic(fragment, mode)
             if not filtered:
                 continue
+            mission_id = (filtered.get("cleanMissionStatus") or {}).get("missionId")
+            previous_mission_id = (self._live_state.get("cleanMissionStatus") or {}).get("missionId")
+            if mission_id and previous_mission_id and mission_id != previous_mission_id:
+                self._live_state_sources["livemap"] = {}
+                self._last_livemap_sample_key = None
+                for name in ("currentstate_get", "currentstate_update"):
+                    self._live_state_sources.get(name, {}).pop("pose", None)
             before = json.dumps(source_state, sort_keys=True, default=str)
             self._deep_merge_dict(source_state, filtered)
             after = json.dumps(source_state, sort_keys=True, default=str)
@@ -1870,9 +1902,11 @@ class IRobotCloudApi:
                 changed = True
                 updates.append({"label": label, "keys": sorted(filtered.keys())[:50], "mode": mode, "source": source_kind})
 
-        if not changed:
+        if not changed and mode != "currentstate":
             return
 
+        previous_reported_at = (self._live_state.get("_meta") or {}).get("robot_reported_at")
+        previous_status_received_at = (self._live_state.get("_meta") or {}).get("status_received_at")
         self._last_live_state_update = datetime.now(tz=UTC).isoformat()
         self._live_state = self._compose_effective_live_state()
         self._live_state["_meta"] = {
@@ -1881,7 +1915,18 @@ class IRobotCloudApi:
             "updates": updates[-10:],
             "source_kind": source_kind,
             "has_currentstate_update": bool(self._live_state_sources.get("currentstate_update")),
+            "status_received_at": self._last_live_state_update if mode == "currentstate" else previous_status_received_at,
         }
+        # AWS response time measures receipt; field metadata measures robot reports.
+        metadata = payload.get("metadata") if isinstance(payload, dict) else None
+        reported = metadata.get("reported") if isinstance(metadata, dict) else None
+        mission = reported.get("cleanMissionStatus") if isinstance(reported, dict) else None
+        phase = mission.get("phase") if isinstance(mission, dict) else None
+        report_time = phase.get("timestamp") if isinstance(phase, dict) else None
+        reported_at = datetime.fromtimestamp(report_time, tz=UTC).isoformat() if isinstance(report_time, (int, float)) else None
+        known_reports = [value for value in (previous_reported_at, reported_at) if value]
+        if known_reports:
+            self._live_state["_meta"]["robot_reported_at"] = max(known_reports)
         await self._persist_live_state_debug()
         history_path = self._event_debug_path("live_state_updates.json")
         if history_path:
@@ -1942,6 +1987,8 @@ class IRobotCloudApi:
         loop.create_task(self._ingest_live_state_payload(topic, payload))
 
     async def _append_event_packet(self, packet: dict[str, Any]) -> None:
+        if packet.get("type") == "message":
+            await self._ingest_live_state_payload(packet.get("topic"), packet.get("payload_json"))
         path = self._event_debug_path("mqtt_packets.json")
         last_path = self._event_debug_path("mqtt_last_packet.json")
         if not path or not last_path:
@@ -1968,8 +2015,6 @@ class IRobotCloudApi:
                         snap.write_text(json.dumps(packet, indent=2, default=str), encoding="utf-8")
 
         await asyncio.to_thread(_write)
-        if packet.get("type") == "message":
-            await self._ingest_live_state_payload(packet.get("topic"), packet.get("payload_json"))
 
     async def _log_event_status(self, payload: dict[str, Any]) -> None:
         await self._append_event_packet({
@@ -1982,10 +2027,18 @@ class IRobotCloudApi:
 
 
 
-    def _cloud_topic_sequences(self, robot_id: str) -> list[list[str]]:
+    def _robot_topic_prefixes(self, robot_id: str) -> tuple[str, str]:
+        """Keep subscriber and command topics on the robot's deployment."""
         robot = self.robots.get(robot_id) or {}
         svc = str(robot.get("svcDeplId") or self.deployment.get("svcDeplId") or "v007")
-        irbt = str(robot.get("irbtTopics") or self.deployment.get("irbtTopics") or f"{svc}-irbthbu")
+        irbt = robot.get("irbtTopics")
+        if not irbt and not robot.get("svcDeplId"):
+            irbt = self.deployment.get("irbtTopics")
+        return svc, str(irbt or f"{svc}-irbthbu")
+
+    def _cloud_topic_sequences(self, robot_id: str) -> list[list[str]]:
+        robot = self.robots.get(robot_id) or {}
+        svc, irbt = self._robot_topic_prefixes(robot_id)
         livemap_topic = self._livemap_topics.get(robot_id)
         primary_group = [f"$aws/things/{robot_id}/shadow/#"]
         if isinstance(livemap_topic, str) and livemap_topic:
@@ -2048,10 +2101,10 @@ class IRobotCloudApi:
                 "ts": datetime.now(tz=UTC).isoformat(),
                 "type": "message" if packet.get("type") == 3 else f"packet_{packet.get('type')}",
                 "topic": packet.get("topic"),
-                "payload_json": {"phase": phase, **packet},
+                "capture_phase": phase,
+                "payload_json": packet.get("payload_json", packet),
                 "payload_text": packet.get("payload_text"),
             })
-            self._merge_live_state_from_packet(packet)
         return packets
 
     async def _send_safe_shadow_gets(self, ws, *, robot_id: str, phase: str) -> list[dict[str, Any]]:
@@ -2116,16 +2169,15 @@ class IRobotCloudApi:
                 "ts": datetime.now(tz=UTC).isoformat(),
                 "type": "message" if ptype == 3 else f"packet_{ptype}",
                 "topic": packet.get("topic"),
-                "payload_json": {"phase": phase, **packet},
+                "capture_phase": phase,
+                "payload_json": packet.get("payload_json", packet),
                 "payload_text": packet.get("payload_text"),
             })
-            self._merge_live_state_from_packet(packet)
         raise CloudApiError(f"timeout waiting for suback packet_id={packet_id} topics={topics}")
 
     def _cloud_topic_filters(self, robot_id: str) -> list[str]:
         robot = self.robots.get(robot_id) or {}
-        svc = str(robot.get("svcDeplId") or self.deployment.get("svcDeplId") or "v007")
-        irbt = str(robot.get("irbtTopics") or self.deployment.get("irbtTopics") or f"{svc}-irbthbu")
+        svc, irbt = self._robot_topic_prefixes(robot_id)
         topics = [
             f"$aws/things/{robot_id}/shadow/get/accepted",
             f"$aws/things/{robot_id}/shadow/update/documents",
@@ -2238,7 +2290,7 @@ class IRobotCloudApi:
             task.cancel()
             try:
                 await task
-            except Exception:
+            except asyncio.CancelledError:
                 pass
 
     async def async_ensure_event_subscriber(self, robot_id: str) -> None:
@@ -2620,6 +2672,11 @@ class IRobotCloudApi:
                                         "payload_json": packet.get("payload_json", packet),
                                     })
     
+                            # Pose traffic may prevent idle timeouts; always bootstrap
+                            # mission status once, even when restored state is non-empty.
+                            async with self._subscriber_send_lock:
+                                state_topic = f"$aws/things/{robot_id}/shadow/name/ro-currentstate/get"
+                                await ws.send(self._mqtt_publish_packet(state_topic, b"{}"))
                             safe_trigger_result = None
 
                             await self._write_runtime_debug("cloud_topic_hits", {
@@ -2666,7 +2723,7 @@ class IRobotCloudApi:
                                     idle_cycles = 0
                                 except asyncio.TimeoutError:
                                     idle_cycles += 1
-                                    if not bootstrap_sent and not self._live_state:
+                                    if not bootstrap_sent and self._last_live_state_update is None:
                                         attempt["phase"] = "delayed_bootstrap_trigger"
                                         safe_trigger_result = await self._run_named_shadow_refresh_retry_window(
                                             robot_id,
@@ -2719,7 +2776,6 @@ class IRobotCloudApi:
                                     "payload_text": packet.get("payload_text"),
                                 }
                                 await self._append_event_packet(rec)
-                                self._merge_live_state_from_packet(packet)
                             break
                     except asyncio.CancelledError:
                         raise
@@ -2864,7 +2920,8 @@ class IRobotCloudApi:
             raise CloudApiError("Discovery response missing MQTT endpoint")
 
         region = self.deployment.get("awsRegion") or self.credentials["CognitoId"].split(":")[0]
-        irbt_topics = self.deployment.get("irbtTopics") or f"{self.deployment.get('svcDeplId','v007')}-irbthbu"
+        robot = self.robots.get(robot_id) or {}
+        svc, irbt_topics = self._robot_topic_prefixes(robot_id)
         topics = [
             f"{irbt_topics}/things/{robot_id}/cmd",
             f"{irbt_topics}/things/{robot_id}/command",
@@ -3116,7 +3173,8 @@ class IRobotCloudApi:
         if ws is None or getattr(ws, "closed", False):
             return None
 
-        irbt_topics = self.deployment.get("irbtTopics") or f"{self.deployment.get('svcDeplId','v007')}-irbthbu"
+        robot = self.robots.get(robot_id) or {}
+        svc, irbt_topics = self._robot_topic_prefixes(robot_id)
         if self._is_room_clean_commanddef(commanddef):
             topics, payload_variants = self._room_clean_single_publish_plan(commanddef, irbt_topics, robot_id)
             topic = topics[0]
@@ -3155,6 +3213,15 @@ class IRobotCloudApi:
                 "packet_len": len(publish_packet),
             })
             await self._subscriber_ws.send(publish_packet)
+        # Request confirmation on the same socket; the subscriber remains the only reader.
+        await asyncio.sleep(2.0)
+        try:
+            async with self._subscriber_send_lock:
+                if self._subscriber_ws_is_usable(robot_id=robot_id):
+                    get_topic = f"$aws/things/{robot_id}/shadow/name/ro-currentstate/get"
+                    await self._subscriber_ws.send(self._mqtt_publish_packet(get_topic, b"{}"))
+        except Exception:
+            _LOGGER.debug("Post-command state request failed", exc_info=True)
         return {
             "status": "published",
             "transport": "existing_subscriber_session",

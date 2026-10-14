@@ -95,7 +95,7 @@ class CleanAllRoomsButton(RoombaV4Entity, ButtonEntity):
 
 
 class SpotCleanButton(RoombaV4Entity, ButtonEntity):
-    _attr_name = "Spot Clean"
+    _attr_name = "Spot Clean Here"
 
     def __init__(self, coordinator) -> None:
         RoombaV4Entity.__init__(self, coordinator, "spot_clean")

@@ -31,6 +31,29 @@ clear_path_history:
 
 
 
+spot_clean:
+  name: Clean a spot
+  description: Clean around a chosen point on the robot's active map. Coordinates are in meters, using the map's vacuum coordinate system.
+  fields:
+    x:
+      name: X coordinate (meters)
+      required: true
+      selector:
+        number:
+          mode: box
+          step: 0.001
+    y:
+      name: Y coordinate (meters)
+      required: true
+      selector:
+        number:
+          mode: box
+          step: 0.001
+    entry_id:
+      required: false
+      selector:
+        text:
+
 clean_room:
   name: Clean room
   description: Start cleaning a specific mapped room by its room name.
