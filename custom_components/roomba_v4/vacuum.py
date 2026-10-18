@@ -31,7 +31,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: RoombaV4ConfigEntry, asy
 
 
 class RoombaV4Vacuum(RoombaV4Entity, StateVacuumEntity):
-    _attr_name = "Vacuum"
+    _attr_translation_key = "vacuum"
     _attr_supported_features = (
         VacuumEntityFeature.START
         | VacuumEntityFeature.PAUSE
@@ -158,3 +158,4 @@ class RoombaV4Vacuum(RoombaV4Entity, StateVacuumEntity):
             "last_event_message": ((data.get("_event_state") or {}).get("last_event_message")),
             "last_event_time": ((data.get("_event_state") or {}).get("last_event_time")),
         }
+

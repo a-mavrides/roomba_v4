@@ -20,7 +20,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: RoombaV4ConfigEntry, asy
 
 
 class RoombaRoomSelect(RoombaV4Entity, SelectEntity):
-    _attr_name = "Room"
+    _attr_translation_key = "room_select"
     def __init__(self, coordinator) -> None:
         RoombaV4Entity.__init__(self, coordinator, "room_select")
 
@@ -47,7 +47,7 @@ class _BasePreferenceSelect(RoombaV4Entity, SelectEntity):
 
 
 class PreferredCleaningModeSelect(_BasePreferenceSelect):
-    _attr_name = "Preferred Cleaning Mode"
+    _attr_translation_key = "preferred_cleaning_mode"
     def __init__(self, coordinator) -> None:
         RoombaV4Entity.__init__(self, coordinator, "preferred_cleaning_mode")
 
@@ -64,7 +64,7 @@ class PreferredCleaningModeSelect(_BasePreferenceSelect):
 
 
 class PreferredSuctionLevelSelect(_BasePreferenceSelect):
-    _attr_name = "Preferred Suction Level"
+    _attr_translation_key = "preferred_suction_level"
     def __init__(self, coordinator) -> None:
         RoombaV4Entity.__init__(self, coordinator, "preferred_suction_level")
 
@@ -81,7 +81,7 @@ class PreferredSuctionLevelSelect(_BasePreferenceSelect):
 
 
 class PreferredWaterLevelSelect(_BasePreferenceSelect):
-    _attr_name = "Preferred Water Level"
+    _attr_translation_key = "preferred_water_level"
     def __init__(self, coordinator) -> None:
         RoombaV4Entity.__init__(self, coordinator, "preferred_water_level")
 
@@ -95,3 +95,4 @@ class PreferredWaterLevelSelect(_BasePreferenceSelect):
 
     async def async_select_option(self, option: str) -> None:
         await self.coordinator.async_set_preferred_water_level(option)
+

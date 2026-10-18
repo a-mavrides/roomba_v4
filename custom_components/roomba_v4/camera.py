@@ -531,7 +531,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: RoombaV4ConfigEntry, asy
     async_add_entities([camera])
 
 class RoombaV4MapCamera(RoombaV4Entity, Camera):
-    _attr_name = "Map"
+    _attr_translation_key = "map"
 
     def __init__(self, coordinator) -> None:
         Camera.__init__(self)
@@ -984,3 +984,4 @@ class RoombaV4MapCamera(RoombaV4Entity, Camera):
         if card_path and card_path.get("path"):
             attrs["path"] = card_path
         return attrs
+

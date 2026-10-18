@@ -54,7 +54,7 @@ class _BaseSensor(RoombaV4Entity, SensorEntity):
         RoombaV4Entity.__init__(self, coordinator, suffix)
 
 class FirmwareSensor(_BaseSensor):
-    _attr_name = "Firmware"
+    _attr_translation_key = "firmware"
     def __init__(self, coordinator) -> None:
         super().__init__(coordinator, "firmware")
     @property
@@ -63,7 +63,7 @@ class FirmwareSensor(_BaseSensor):
         return robot.get("softwareVer") or robot.get("firmware") or robot.get("robot_version")
 
 class SkuSensor(_BaseSensor):
-    _attr_name = "SKU"
+    _attr_translation_key = "sku"
     def __init__(self, coordinator) -> None:
         super().__init__(coordinator, "sku")
     @property
@@ -72,7 +72,7 @@ class SkuSensor(_BaseSensor):
         return robot.get("sku")
 
 class ActiveMapIdSensor(_BaseSensor):
-    _attr_name = "Active Map ID"
+    _attr_translation_key = "active_map_id"
     def __init__(self, coordinator) -> None:
         super().__init__(coordinator, "active_map_id")
     @property
@@ -80,7 +80,7 @@ class ActiveMapIdSensor(_BaseSensor):
         return (self.coordinator.data or {}).get("active_map_id")
 
 class ActiveMapVersionSensor(_BaseSensor):
-    _attr_name = "Active Map Version"
+    _attr_translation_key = "active_map_version"
     def __init__(self, coordinator) -> None:
         super().__init__(coordinator, "active_map_version")
     @property
@@ -88,7 +88,7 @@ class ActiveMapVersionSensor(_BaseSensor):
         return (self.coordinator.data or {}).get("active_map_version")
 
 class MapUrlKnownSensor(_BaseSensor):
-    _attr_name = "Map Download Available"
+    _attr_translation_key = "map_url_known"
     def __init__(self, coordinator) -> None:
         super().__init__(coordinator, "map_url_known")
     @property
@@ -96,7 +96,7 @@ class MapUrlKnownSensor(_BaseSensor):
         return bool((self.coordinator.data or {}).get("s3_map_url_known"))
 
 class RoomsCountSensor(_BaseSensor):
-    _attr_name = "Rooms Count"
+    _attr_translation_key = "rooms_count"
     def __init__(self, coordinator) -> None:
         super().__init__(coordinator, "rooms_count")
     @property
@@ -104,7 +104,7 @@ class RoomsCountSensor(_BaseSensor):
         return len(self.coordinator.rooms)
 
 class RoutinesCountSensor(_BaseSensor):
-    _attr_name = "Routines Count"
+    _attr_translation_key = "routines_count"
     def __init__(self, coordinator) -> None:
         super().__init__(coordinator, "routines_count")
     @property
@@ -113,7 +113,7 @@ class RoutinesCountSensor(_BaseSensor):
         return len(routines) if isinstance(routines, list) else 0
 
 class AvailableRoutinesSensor(_BaseSensor):
-    _attr_name = "Available Routines"
+    _attr_translation_key = "available_routines"
     def __init__(self, coordinator) -> None:
         super().__init__(coordinator, "available_routines")
     @property
@@ -136,7 +136,7 @@ class _StatusSensor(_BaseSensor):
 
 
 class StatusMessageSensor(_StatusSensor):
-    _attr_name = "Status Message"
+    _attr_translation_key = "status_message"
     def __init__(self, coordinator) -> None:
         super().__init__(coordinator, "status_message")
 
@@ -169,7 +169,7 @@ class StatusMessageSensor(_StatusSensor):
 
 
 class BatterySensor(_StatusSensor):
-    _attr_name = "Battery"
+    _attr_translation_key = "battery"
     _attr_device_class = SensorDeviceClass.BATTERY
     _attr_native_unit_of_measurement = "%"
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -197,7 +197,7 @@ class BatterySensor(_StatusSensor):
 
 
 class MissionPhaseSensor(_StatusSensor):
-    _attr_name = "Mission Phase"
+    _attr_translation_key = "mission_phase"
     def __init__(self, coordinator) -> None:
         super().__init__(coordinator, "mission_phase")
     @property
@@ -206,7 +206,7 @@ class MissionPhaseSensor(_StatusSensor):
 
 
 class MissionCycleSensor(_StatusSensor):
-    _attr_name = "Mission Cycle"
+    _attr_translation_key = "mission_cycle"
     def __init__(self, coordinator) -> None:
         super().__init__(coordinator, "mission_cycle")
     @property
@@ -215,7 +215,7 @@ class MissionCycleSensor(_StatusSensor):
 
 
 class MissionErrorSensor(_StatusSensor):
-    _attr_name = "Mission Error"
+    _attr_translation_key = "mission_error"
     def __init__(self, coordinator) -> None:
         super().__init__(coordinator, "mission_error")
     @property
@@ -228,7 +228,7 @@ class MissionErrorSensor(_StatusSensor):
 
 
 class CleaningModeSensor(_StatusSensor):
-    _attr_name = "Cleaning Mode"
+    _attr_translation_key = "cleaning_mode"
     def __init__(self, coordinator) -> None:
         super().__init__(coordinator, "cleaning_mode")
     @property
@@ -245,7 +245,7 @@ class CleaningModeSensor(_StatusSensor):
 
 
 class OperatingModeSensor(_StatusSensor):
-    _attr_name = "Operating Mode"
+    _attr_translation_key = "operating_mode"
     def __init__(self, coordinator) -> None:
         super().__init__(coordinator, "operating_mode")
     @property
@@ -262,7 +262,7 @@ class OperatingModeSensor(_StatusSensor):
         }
 
 class LastEventSensor(_BaseSensor):
-    _attr_name = "Last Event"
+    _attr_translation_key = "last_event"
 
     def __init__(self, coordinator) -> None:
         super().__init__(coordinator, "last_event")
@@ -287,7 +287,7 @@ class _PositionSensor(_StatusSensor):
 
 
 class PositionXSensor(_PositionSensor):
-    _attr_name = "Position X"
+    _attr_translation_key = "position_x"
     def __init__(self, coordinator) -> None:
         super().__init__(coordinator, "position_x")
     @property
@@ -296,7 +296,7 @@ class PositionXSensor(_PositionSensor):
 
 
 class PositionYSensor(_PositionSensor):
-    _attr_name = "Position Y"
+    _attr_translation_key = "position_y"
     def __init__(self, coordinator) -> None:
         super().__init__(coordinator, "position_y")
     @property
@@ -305,9 +305,10 @@ class PositionYSensor(_PositionSensor):
 
 
 class PositionThetaSensor(_PositionSensor):
-    _attr_name = "Position Theta"
+    _attr_translation_key = "position_theta"
     def __init__(self, coordinator) -> None:
         super().__init__(coordinator, "position_theta")
     @property
     def native_value(self):
         return self._status().get("theta")
+

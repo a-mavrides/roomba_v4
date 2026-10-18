@@ -31,7 +31,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: RoombaV4ConfigEntry, asy
 
 
 class RefreshMapButton(RoombaV4Entity, ButtonEntity):
-    _attr_name = "Refresh Map From Archive"
+    _attr_translation_key = "refresh_map"
 
     def __init__(self, coordinator) -> None:
         RoombaV4Entity.__init__(self, coordinator, "refresh_map")
@@ -45,7 +45,7 @@ class RefreshMapButton(RoombaV4Entity, ButtonEntity):
 
 
 class DownloadMapFromUrlButton(RoombaV4Entity, ButtonEntity):
-    _attr_name = "Download Map From URL"
+    _attr_translation_key = "download_map"
 
     def __init__(self, coordinator) -> None:
         RoombaV4Entity.__init__(self, coordinator, "download_map")
@@ -58,7 +58,7 @@ class DownloadMapFromUrlButton(RoombaV4Entity, ButtonEntity):
 
 
 class CleanSelectedRoomButton(RoombaV4Entity, ButtonEntity):
-    _attr_name = "Clean Selected Room"
+    _attr_translation_key = "clean_selected_room"
 
     def __init__(self, coordinator) -> None:
         RoombaV4Entity.__init__(self, coordinator, "clean_selected_room")
@@ -72,7 +72,7 @@ class CleanSelectedRoomButton(RoombaV4Entity, ButtonEntity):
 
 
 class DeleteCachedMapsAndFetchLatestButton(RoombaV4Entity, ButtonEntity):
-    _attr_name = "Delete Cached Maps & Fetch Latest"
+    _attr_translation_key = "delete_cached_maps_fetch_latest"
 
     def __init__(self, coordinator) -> None:
         RoombaV4Entity.__init__(self, coordinator, "delete_cached_maps_fetch_latest")
@@ -82,7 +82,7 @@ class DeleteCachedMapsAndFetchLatestButton(RoombaV4Entity, ButtonEntity):
 
 
 class CleanAllRoomsButton(RoombaV4Entity, ButtonEntity):
-    _attr_name = "Clean All Rooms"
+    _attr_translation_key = "clean_all_rooms"
 
     def __init__(self, coordinator) -> None:
         RoombaV4Entity.__init__(self, coordinator, "clean_all_rooms")
@@ -95,7 +95,7 @@ class CleanAllRoomsButton(RoombaV4Entity, ButtonEntity):
 
 
 class SpotCleanButton(RoombaV4Entity, ButtonEntity):
-    _attr_name = "Spot Clean Here"
+    _attr_translation_key = "spot_clean"
 
     def __init__(self, coordinator) -> None:
         RoombaV4Entity.__init__(self, coordinator, "spot_clean")
@@ -108,7 +108,7 @@ class SpotCleanButton(RoombaV4Entity, ButtonEntity):
 
 
 class PauseCleaningButton(RoombaV4Entity, ButtonEntity):
-    _attr_name = "Pause Cleaning"
+    _attr_translation_key = "pause_cleaning"
 
     def __init__(self, coordinator) -> None:
         RoombaV4Entity.__init__(self, coordinator, "pause_cleaning")
@@ -121,7 +121,7 @@ class PauseCleaningButton(RoombaV4Entity, ButtonEntity):
 
 
 class ResumeCleaningButton(RoombaV4Entity, ButtonEntity):
-    _attr_name = "Resume Cleaning"
+    _attr_translation_key = "resume_cleaning"
 
     def __init__(self, coordinator) -> None:
         RoombaV4Entity.__init__(self, coordinator, "resume_cleaning")
@@ -134,7 +134,7 @@ class ResumeCleaningButton(RoombaV4Entity, ButtonEntity):
 
 
 class StopCleaningButton(RoombaV4Entity, ButtonEntity):
-    _attr_name = "Stop Cleaning"
+    _attr_translation_key = "stop_cleaning"
 
     def __init__(self, coordinator) -> None:
         RoombaV4Entity.__init__(self, coordinator, "stop_cleaning")
@@ -147,7 +147,7 @@ class StopCleaningButton(RoombaV4Entity, ButtonEntity):
 
 
 class ReturnToBaseButton(RoombaV4Entity, ButtonEntity):
-    _attr_name = "Return To Base"
+    _attr_translation_key = "return_to_base"
 
     def __init__(self, coordinator) -> None:
         RoombaV4Entity.__init__(self, coordinator, "return_to_base")
@@ -160,7 +160,7 @@ class ReturnToBaseButton(RoombaV4Entity, ButtonEntity):
 
 
 class ClearPathTrailButton(RoombaV4Entity, ButtonEntity):
-    _attr_name = "Clear Path Trail"
+    _attr_translation_key = "clear_path_trail"
 
     def __init__(self, coordinator) -> None:
         RoombaV4Entity.__init__(self, coordinator, "clear_path_trail")
@@ -170,3 +170,4 @@ class ClearPathTrailButton(RoombaV4Entity, ButtonEntity):
         if camera is not None:
             await camera.async_clear_path_history()
         self.coordinator.async_update_listeners()
+

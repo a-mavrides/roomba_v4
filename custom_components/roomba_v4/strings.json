@@ -24,6 +24,195 @@
       "cannot_connect": "Cannot connect",
       "unknown": "Unexpected error",
       "no_robots": "No robots were found on this account"
+    },
+    "abort": {
+      "already_configured": "This robot is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Robot options",
+        "data": {
+          "auto_download_map": "Auto-download map when available",
+          "debug_enabled": "Enable debug logging"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "firmware": {
+        "name": "Firmware"
+      },
+      "sku": {
+        "name": "SKU"
+      },
+      "active_map_id": {
+        "name": "Active Map ID"
+      },
+      "active_map_version": {
+        "name": "Active Map Version"
+      },
+      "map_url_known": {
+        "name": "Map Download Available"
+      },
+      "rooms_count": {
+        "name": "Rooms Count"
+      },
+      "routines_count": {
+        "name": "Routines Count"
+      },
+      "available_routines": {
+        "name": "Available Routines"
+      },
+      "status_message": {
+        "name": "Status Message"
+      },
+      "battery": {
+        "name": "Battery"
+      },
+      "mission_phase": {
+        "name": "Mission Phase"
+      },
+      "mission_cycle": {
+        "name": "Mission Cycle"
+      },
+      "mission_error": {
+        "name": "Mission Error"
+      },
+      "cleaning_mode": {
+        "name": "Cleaning Mode"
+      },
+      "operating_mode": {
+        "name": "Operating Mode"
+      },
+      "last_event": {
+        "name": "Last Event"
+      },
+      "position_x": {
+        "name": "Position X"
+      },
+      "position_y": {
+        "name": "Position Y"
+      },
+      "position_theta": {
+        "name": "Position Theta"
+      }
+    },
+    "button": {
+      "refresh_map": {
+        "name": "Refresh Map From Archive"
+      },
+      "download_map": {
+        "name": "Download Map From URL"
+      },
+      "clean_selected_room": {
+        "name": "Clean Selected Room"
+      },
+      "delete_cached_maps_fetch_latest": {
+        "name": "Delete Cached Maps & Fetch Latest"
+      },
+      "clean_all_rooms": {
+        "name": "Clean All Rooms"
+      },
+      "spot_clean": {
+        "name": "Spot Clean Here"
+      },
+      "pause_cleaning": {
+        "name": "Pause Cleaning"
+      },
+      "resume_cleaning": {
+        "name": "Resume Cleaning"
+      },
+      "stop_cleaning": {
+        "name": "Stop Cleaning"
+      },
+      "return_to_base": {
+        "name": "Return To Base"
+      },
+      "clear_path_trail": {
+        "name": "Clear Path Trail"
+      }
+    },
+    "select": {
+      "room_select": {
+        "name": "Room"
+      },
+      "preferred_cleaning_mode": {
+        "name": "Preferred Cleaning Mode"
+      },
+      "preferred_suction_level": {
+        "name": "Preferred Suction Level"
+      },
+      "preferred_water_level": {
+        "name": "Preferred Water Level"
+      }
+    },
+    "vacuum": {
+      "vacuum": {
+        "name": "Vacuum"
+      }
+    },
+    "camera": {
+      "map": {
+        "name": "Map"
+      }
+    }
+  },
+  "services": {
+    "refresh_map_from_archive": {
+      "name": "Refresh map from archive",
+      "fields": {
+        "archive_path": {
+          "name": "Archive path"
+        },
+        "show_labels": {
+          "name": "Show labels"
+        },
+        "show_coverage": {
+          "name": "Show coverage"
+        }
+      }
+    },
+    "refresh_map_from_url": {
+      "name": "Refresh map from URL",
+      "fields": {
+        "url": {
+          "name": "URL"
+        }
+      }
+    },
+    "clear_path_history": {
+      "name": "Clear path history",
+      "description": "Clear the locally stored robot trail shown on the map."
+    },
+    "spot_clean": {
+      "name": "Clean a spot",
+      "fields": {
+        "x": {
+          "name": "X coordinate (meters)"
+        },
+        "y": {
+          "name": "Y coordinate (meters)"
+        },
+        "entry_id": {
+          "name": "Integration entry ID"
+        }
+      },
+      "description": "Clean around a chosen point on the active map. Coordinates are in meters in the map’s vacuum coordinate system."
+    },
+    "clean_room": {
+      "name": "Clean room",
+      "fields": {
+        "room_name": {
+          "name": "Room name"
+        },
+        "entry_id": {
+          "name": "Integration entry ID"
+        }
+      },
+      "description": "Start cleaning a mapped room by its name."
     }
   }
 }

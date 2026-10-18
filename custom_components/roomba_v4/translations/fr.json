@@ -1,0 +1,218 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connexion au cloud iRobot",
+        "description": "Saisissez les identifiants de votre compte iRobot.",
+        "data": {
+          "username": "Adresse e-mail",
+          "password": "Mot de passe",
+          "country_code": "Code du pays",
+          "auto_download_map": "Télécharger automatiquement la carte lorsqu’elle est disponible"
+        }
+      },
+      "select_robot": {
+        "title": "Sélection du robot",
+        "description": "Choisissez le robot à ajouter.",
+        "data": {
+          "robot_blid": "Robot"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Identifiants incorrects",
+      "cannot_connect": "Connexion impossible",
+      "unknown": "Erreur inattendue",
+      "no_robots": "Aucun robot trouvé sur ce compte"
+    },
+    "abort": {
+      "already_configured": "Ce robot est déjà configuré."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Options du robot",
+        "data": {
+          "auto_download_map": "Télécharger automatiquement la carte lorsqu’elle est disponible",
+          "debug_enabled": "Activer les journaux de débogage"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "firmware": {
+        "name": "Micrologiciel"
+      },
+      "sku": {
+        "name": "Référence du modèle"
+      },
+      "active_map_id": {
+        "name": "Identifiant de la carte active"
+      },
+      "active_map_version": {
+        "name": "Version de la carte active"
+      },
+      "map_url_known": {
+        "name": "Téléchargement de la carte disponible"
+      },
+      "rooms_count": {
+        "name": "Nombre de pièces"
+      },
+      "routines_count": {
+        "name": "Nombre de routines"
+      },
+      "available_routines": {
+        "name": "Routines disponibles"
+      },
+      "status_message": {
+        "name": "Message d’état"
+      },
+      "battery": {
+        "name": "Batterie"
+      },
+      "mission_phase": {
+        "name": "Phase de la mission"
+      },
+      "mission_cycle": {
+        "name": "Cycle de la mission"
+      },
+      "mission_error": {
+        "name": "Erreur de la mission"
+      },
+      "cleaning_mode": {
+        "name": "Mode de nettoyage"
+      },
+      "operating_mode": {
+        "name": "Mode de fonctionnement"
+      },
+      "last_event": {
+        "name": "Dernier événement"
+      },
+      "position_x": {
+        "name": "Position X"
+      },
+      "position_y": {
+        "name": "Position Y"
+      },
+      "position_theta": {
+        "name": "Orientation"
+      }
+    },
+    "button": {
+      "refresh_map": {
+        "name": "Actualiser la carte depuis une archive"
+      },
+      "download_map": {
+        "name": "Télécharger la carte depuis une URL"
+      },
+      "clean_selected_room": {
+        "name": "Nettoyer la pièce sélectionnée"
+      },
+      "delete_cached_maps_fetch_latest": {
+        "name": "Effacer les cartes en cache et récupérer la dernière"
+      },
+      "clean_all_rooms": {
+        "name": "Nettoyer toutes les pièces"
+      },
+      "spot_clean": {
+        "name": "Nettoyer cette zone"
+      },
+      "pause_cleaning": {
+        "name": "Mettre le nettoyage en pause"
+      },
+      "resume_cleaning": {
+        "name": "Reprendre le nettoyage"
+      },
+      "stop_cleaning": {
+        "name": "Arrêter le nettoyage"
+      },
+      "return_to_base": {
+        "name": "Retourner à la base"
+      },
+      "clear_path_trail": {
+        "name": "Effacer le tracé du parcours"
+      }
+    },
+    "select": {
+      "room_select": {
+        "name": "Pièce"
+      },
+      "preferred_cleaning_mode": {
+        "name": "Mode de nettoyage souhaité"
+      },
+      "preferred_suction_level": {
+        "name": "Puissance d’aspiration souhaitée"
+      },
+      "preferred_water_level": {
+        "name": "Débit d’eau souhaité"
+      }
+    },
+    "vacuum": {
+      "vacuum": {
+        "name": "Aspirateur"
+      }
+    },
+    "camera": {
+      "map": {
+        "name": "Carte"
+      }
+    }
+  },
+  "services": {
+    "refresh_map_from_archive": {
+      "name": "Actualiser la carte depuis une archive",
+      "fields": {
+        "archive_path": {
+          "name": "Chemin de l’archive"
+        },
+        "show_labels": {
+          "name": "Afficher les noms des pièces"
+        },
+        "show_coverage": {
+          "name": "Afficher les zones nettoyées"
+        }
+      }
+    },
+    "refresh_map_from_url": {
+      "name": "Actualiser la carte depuis une URL",
+      "fields": {
+        "url": {
+          "name": "URL"
+        }
+      }
+    },
+    "clear_path_history": {
+      "name": "Effacer l’historique du parcours",
+      "description": "Effacer le tracé du robot enregistré localement et affiché sur la carte."
+    },
+    "spot_clean": {
+      "name": "Nettoyer une zone",
+      "fields": {
+        "x": {
+          "name": "Coordonnée X (mètres)"
+        },
+        "y": {
+          "name": "Coordonnée Y (mètres)"
+        },
+        "entry_id": {
+          "name": "Identifiant de l’entrée d’intégration"
+        }
+      },
+      "description": "Nettoyer autour d’un point choisi sur la carte active. Les coordonnées sont exprimées en mètres dans le repère de l’aspirateur sur la carte."
+    },
+    "clean_room": {
+      "name": "Nettoyer une pièce",
+      "fields": {
+        "room_name": {
+          "name": "Nom de la pièce"
+        },
+        "entry_id": {
+          "name": "Identifiant de l’entrée d’intégration"
+        }
+      },
+      "description": "Lancer le nettoyage d’une pièce cartographiée à partir de son nom."
+    }
+  }
+}
